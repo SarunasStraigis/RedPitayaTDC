@@ -47,13 +47,32 @@ def put(path: str, payload: dict, timeout: float = 2.0) -> tuple:
 
 def check_snapshot_fields() -> str | None:
     sys.path.insert(0, os.path.join(ROOT, "sw"))
-    from tdc_regs import FLAG_UNMATCHED_STOP, is_good_pair
+    from tdc_regs import FLAG_UNMATCHED_STOP, is_good_pair, same_bin_pair
     from tdc_server import pack_snapshot
 
     if is_good_pair(True, FLAG_UNMATCHED_STOP):
         return "unmatched STOP must not count as a good pair"
     if not is_good_pair(True, 0):
         return "empty flags should be a good pair"
+    if not same_bin_pair(True, 0, 40, 40):
+        return "identical timestamps should be same_bin"
+    if same_bin_pair(True, 0, 40, 41):
+        return "different timestamps must not be same_bin"
+    if same_bin_pair(True, FLAG_UNMATCHED_STOP, 9, 9):
+        return "unmatched STOP must not be same_bin"
+    zero = pack_snapshot(
+        valid=True,
+        seq=3,
+        dt_ticks=0,
+        t_start=40,
+        t_stop=40,
+        flags=0,
+        age_ms=0.5,
+        armed=False,
+        clock_hz=250_000_000,
+    )
+    if zero.get("same_bin") is not True or zero.get("dt_ns") != 0.0:
+        return "0 ns snapshot should set same_bin and dt_ns=0: %r" % zero
     held = pack_snapshot(
         valid=True,
         seq=12,
@@ -76,6 +95,8 @@ def check_snapshot_fields() -> str | None:
         return "held snapshot should keep last-good flags empty: %r" % held
     if held.get("dt_ns") is None or held.get("held") is not True:
         return "held snapshot should publish last-good dt_ns: %r" % held
+    if held.get("same_bin"):
+        return "held nonzero interval must not be same_bin: %r" % held
     return None
 
 
@@ -132,6 +153,12 @@ def main() -> int:
             return 1
         if "latest_flags" not in latest or latest.get("held") is not False:
             print("missing latest_flags/held on sim latest: %r" % latest)
+            return 1
+        if latest.get("same_bin"):
+            print("sim 1 ms interval should not be same_bin: %r" % latest)
+            return 1
+        if latest.get("t_stop_ticks") is None:
+            print("sim latest missing t_stop_ticks: %r" % latest)
             return 1
 
         pins = get("/api/pins")

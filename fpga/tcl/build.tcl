@@ -23,7 +23,11 @@ set proj_dir [file join $fpga_dir vivado]
 file mkdir $out_dir
 
 if {[file exists $proj_dir]} {
-    file delete -force $proj_dir
+    if {[catch {file delete -force $proj_dir} err]} {
+        set proj_dir [file join $fpga_dir vivado_batch]
+        puts "WARNING: could not clear fpga/vivado ($err). Close the other Vivado session. Using $proj_dir"
+        catch {file delete -force $proj_dir}
+    }
 }
 
 create_project tdc $proj_dir -part xc7z010clg400-1 -force

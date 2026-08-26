@@ -167,13 +167,43 @@ module tb_tdc_timestamp;
         pulse_pair(2500000);
         expect_dt("10ms", 2500000, 0, 0);
 
-        $display("=== unmatched STOP ===");
+        $display("=== unmatched STOP is ignored ===");
+        begin : unmatch_ignore
+            integer prev_dt;
+            integer prev_seq;
+            prev_dt = result_dt_ticks;
+            prev_seq = result_seq;
+            @(negedge clk);
+            stop_rise_r = 1'b1;
+            @(posedge clk);
+            @(negedge clk);
+            stop_rise_r = 1'b0;
+            wait_clks(4);
+            if (result_dt_ticks !== prev_dt[31:0] || result_seq !== prev_seq[31:0] || result_unmatched_stop !== 1'b0) begin
+                $display("FAIL unmatched: dt/seq/flag changed");
+                fail = fail + 1;
+            end else begin
+                $display("PASS unmatched ignored: dt=%0d", result_dt_ticks);
+                pass = pass + 1;
+            end
+        end
+
+        $display("=== leftover DDR STOP after good pair ===");
+        pulse_pair(5);
+        expect_dt("20ns-before-leftover", 5, 0, 0);
         @(negedge clk);
-        stop_rise_r = 1'b1;
+        stop_rise_f = 1'b1;
         @(posedge clk);
         @(negedge clk);
-        stop_rise_r = 1'b0;
-        expect_dt("unmatched", 0, 0, 1);
+        stop_rise_f = 1'b0;
+        wait_clks(3);
+        if (result_dt_ticks !== 32'd5 || result_unmatched_stop !== 1'b0) begin
+            $display("FAIL leftover STOP: dt=%0d unmatched=%0d", result_dt_ticks, result_unmatched_stop);
+            fail = fail + 1;
+        end else begin
+            $display("PASS leftover STOP: dt=%0d", result_dt_ticks);
+            pass = pass + 1;
+        end
 
         $display("=== timeout ===");
         timeout_ticks = TIMEOUT_TICKS;

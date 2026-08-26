@@ -39,7 +39,20 @@ def main(argv=None) -> int:
                 snap = get_json("%s/api/wait?%s" % (base, q), args.timeout_ms / 1000.0 + 2.0)
                 if snap.get("valid") and snap.get("seq") != last_seq and not snap.get("wait_timed_out"):
                     last_seq = snap.get("seq")
-                    print("%(seq)s  %(dt_ns)s ns  flags=%(flags)s" % snap, flush=True)
+                    print(
+                        "%(seq)s  %(dt_ns)s ns  flags=%(flags)s  latest=%(latest_flags)s  held=%(held)s  same_bin=%(same_bin)s  t=%(t_start_ticks)s..%(t_stop_ticks)s"
+                        % {
+                            "seq": snap.get("seq"),
+                            "dt_ns": snap.get("dt_ns"),
+                            "flags": snap.get("flags"),
+                            "latest_flags": snap.get("latest_flags"),
+                            "held": snap.get("held"),
+                            "same_bin": snap.get("same_bin"),
+                            "t_start_ticks": snap.get("t_start_ticks"),
+                            "t_stop_ticks": snap.get("t_stop_ticks"),
+                        },
+                        flush=True,
+                    )
         except KeyboardInterrupt:
             return 0
 

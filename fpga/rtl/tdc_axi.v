@@ -223,11 +223,23 @@ module tdc_axi #(
     // -------------------------------------------------------------------------
     // IDDR capture at 125 MHz (4 ns bins) and same-clock TDC
     // -------------------------------------------------------------------------
-    reg rst_125_d;
+    // AXI reset clears IDDR. Pin-change / soft reset only restarts the pairing
+    // FSM and preloads the edge-detect delay flops so idle-high TTL does not
+    // look like a rising edge.
+    reg rst_axi_d;
+    reg rst_fsm_d;
+    reg [1:0] holdoff_cnt;
     always @(posedge clk_125) begin
-        rst_125_d <= (~s_axi_aresetn) | soft_reset_pulse;
+        rst_axi_d <= ~s_axi_aresetn;
+        rst_fsm_d <= (~s_axi_aresetn) | soft_reset_pulse;
+        if ((~s_axi_aresetn) | soft_reset_pulse | rst_fsm_d)
+            holdoff_cnt <= 2'd3;
+        else if (holdoff_cnt != 2'd0)
+            holdoff_cnt <= holdoff_cnt - 2'd1;
     end
-    wire tdc_rst = rst_125_d;
+    wire iddr_rst     = rst_axi_d;
+    wire fsm_rst      = rst_fsm_d;
+    wire edge_holdoff = rst_fsm_d | (holdoff_cnt != 2'd0);
 
     wire [9:0] dio_q1;
     wire [9:0] dio_q2;
@@ -250,7 +262,7 @@ module tdc_axi #(
                 .C  (clk_125),
                 .CE (1'b1),
                 .D  (dio_i[gi]),
-                .R  (tdc_rst),
+                .R  (iddr_rst),
                 .S  (1'b0)
             );
         end
@@ -264,12 +276,14 @@ module tdc_axi #(
 
     reg start_q1_d, start_q2_d, stop_q1_d, stop_q2_d;
     always @(posedge clk_125) begin
-        if (tdc_rst) begin
+        if (iddr_rst) begin
             start_q1_d <= 1'b0;
             start_q2_d <= 1'b0;
             stop_q1_d  <= 1'b0;
             stop_q2_d  <= 1'b0;
         end else begin
+            // Follow the live samples during fsm_rst (pin change) so the
+            // first cycle after holdoff is not 0→1 from a high idle level.
             start_q1_d <= start_q1;
             start_q2_d <= start_q2;
             stop_q1_d  <= stop_q1;
@@ -277,10 +291,28 @@ module tdc_axi #(
         end
     end
 
-    wire start_rise_r = start_q1 & ~start_q1_d;
-    wire start_rise_f = start_q2 & ~start_q2_d;
-    wire stop_rise_r  = stop_q1  & ~stop_q1_d;
-    wire stop_rise_f  = stop_q2  & ~stop_q2_d;
+    wire start_raw_r = start_q1 & ~start_q1_d;
+    wire start_raw_f = start_q2 & ~start_q2_d;
+    wire stop_raw_r  = stop_q1  & ~stop_q1_d;
+    wire stop_raw_f  = stop_q2  & ~stop_q2_d;
+
+    // One physical TTL rise can appear as Q2 then Q1 on consecutive cycles.
+    // Keep the first beat; drop the complementary leftover.
+    reg start_ev_d, stop_ev_d;
+    wire start_rise_r = start_raw_r & ~start_ev_d & ~edge_holdoff;
+    wire start_rise_f = start_raw_f & ~start_ev_d & ~edge_holdoff;
+    wire stop_rise_r  = stop_raw_r  & ~stop_ev_d  & ~edge_holdoff;
+    wire stop_rise_f  = stop_raw_f  & ~stop_ev_d  & ~edge_holdoff;
+
+    always @(posedge clk_125) begin
+        if (fsm_rst) begin
+            start_ev_d <= 1'b0;
+            stop_ev_d  <= 1'b0;
+        end else begin
+            start_ev_d <= start_rise_r | start_rise_f;
+            stop_ev_d  <= stop_rise_r  | stop_rise_f;
+        end
+    end
 
     wire        core_armed;
     wire        core_strobe;
@@ -294,7 +326,7 @@ module tdc_axi #(
 
     tdc_timestamp u_core (
         .clk                   (clk_125),
-        .rst                   (tdc_rst),
+        .rst                   (fsm_rst),
         .enable                (ctrl_enable),
         .start_rise_r          (start_rise_r),
         .start_rise_f          (start_rise_f),

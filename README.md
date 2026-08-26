@@ -36,6 +36,8 @@ A bitstream rebuild is required after this pin mux was added. Old overlays ignor
 - 5 V TTL needs a level shifter; these pins are **not** 5 V tolerant.
 
 Same-cycle START and STOP (both edges in the same 4 ns bin) measures as **0 ns**.
+A STOP with no START, including the leftover DDR sample of a wide STOP pulse, is
+ignored so it cannot replace a real delay with 0 ns.
 
 ## Build the bitstream
 
@@ -244,15 +246,26 @@ curl -X PUT http://rp-XXXX.local:8080/api/pins -H "Content-Type: application/jso
   "clock_hz": 250000000,
   "flags": [],
   "age_ms": 12.0,
-  "armed": false
+  "armed": false,
+  "fpga_seq": 1234,
+  "latest_flags": [],
+  "held": false,
+  "t_start_ticks": 1000,
+  "t_stop_ticks": 251001,
+  "same_bin": false
 }
 ```
 
-- `valid` is false until the first completed pair (or timeout / unmatched STOP).
+- `valid` is false until the first completed START→STOP pair (or timeout).
 - `dt_ns = dt_ticks * 1e9 / clock_hz` (4 ns per tick at 250 MHz).
 - `seq` increments on every completed event. If you poll slower than the pulses,
   you only see the **latest** interval; `seq` jumps by the number skipped.
-- `flags` may contain `timeout`, `overflow`, `unmatched_stop`.
+- `flags` may contain `timeout` or `overflow`. A STOP with no START is ignored
+  and does not replace the last delay.
+- `same_bin` is true when `t_start_ticks == t_stop_ticks` on a good pair (true
+  0 ns, or both edges in the same 4 ns bin from crosstalk).
+- `held` / `latest_flags` distinguish a live good pair from a previous one kept
+  while the FPGA last wrote a non-delay result.
 - `GET /api/wait` blocks until `seq` changes or `timeout_ms` elapses (then the
   same JSON with `wait_timed_out: true`).
 
@@ -302,7 +315,7 @@ After calibration, a true 0 ns pair should read near 0.
 | 10  | DT_TICKS  | R      | signed interval in 250 MHz ticks           |
 | 14  | T_START   | R      | start timestamp                            |
 | 18  | T_STOP    | R      | stop timestamp                             |
-| 1C  | FLAGS     | R      | bit0 timeout, bit1 overflow, bit2 unmatched|
+| 1C  | FLAGS     | R      | bit0 timeout, bit1 overflow, bit2 unmatched (unused; idle STOP is ignored) |
 | 20  | TIMEOUT   | RW     | timeout in ticks (default 500e6 = 2 s)     |
 | 24  | CLOCK_HZ  | R      | `250000000`                                |
 | 28  | PINS      | RW     | [3:0] START sel, [7:4] STOP sel, [31:16]=1 |
@@ -322,11 +335,12 @@ bash fpga/sim/run_sim.sh
 powershell -File fpga/sim/run_sim.ps1
 ```
 
-The Verilog bench checks 0 ns, 4 ns, 20 ns, 1 ms, 10 ms, unmatched STOP, and timeout.
+The Verilog bench checks 0 ns, 4 ns, 20 ns, 1 ms, 10 ms, ignored unmatched STOP, leftover DDR STOP, and timeout.
 If Icarus is not installed, a cycle-accurate Python model of the same cases is:
 
 ```bash
 python fpga/sim/test_tdc_model.py
+python fpga/sim/test_tdc_edges.py
 ```
 
 REST/UDP without hardware:

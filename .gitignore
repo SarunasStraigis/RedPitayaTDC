@@ -1,4 +1,5 @@
 fpga/vivado/
+fpga/vivado_batch/
 fpga/output/*.log
 fpga/sim/*.vvp
 fpga/sim/*.vcd

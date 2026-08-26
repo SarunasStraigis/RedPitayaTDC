@@ -137,6 +137,8 @@ do_start() {
     : >> "$LOG"
     (
         cd "$APPDIR" || exit 127
+        exec 9>&-
+        exec 8>&-
         exec >>"$LOG" 2>&1
         exec "$PY" "$SERVER" --host 0.0.0.0 --port 8080 --udp-port 0
     ) &
@@ -204,7 +206,13 @@ case "$cmd" in
         do_stop
         exit $?
         ;;
-    start) ;;
+    start)
+        if health_ok; then
+            touch "$WANT"
+            print_status
+            exit 0
+        fi
+        ;;
     *)
         echo '{"state":"error","error":"usage: control.sh start|stop|status"}'
         exit 2

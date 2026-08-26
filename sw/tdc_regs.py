@@ -67,6 +67,13 @@ def is_good_pair(valid: bool, flags: int) -> bool:
     return bool(valid) and (int(flags) & BAD_FLAG_MASK) == 0
 
 
+def same_bin_pair(valid: bool, flags: int, t_start: int, t_stop: int) -> bool:
+    """True when a good pair has identical start/stop timestamps (0 ns / same 4 ns bin)."""
+    if not is_good_pair(valid, flags):
+        return False
+    return (int(t_start) & 0xFFFFFFFF) == (int(t_stop) & 0xFFFFFFFF)
+
+
 def pin_label(entry: dict) -> str:
     return "%s (E1 pin %d)" % (entry["name"], entry["e1"])
 

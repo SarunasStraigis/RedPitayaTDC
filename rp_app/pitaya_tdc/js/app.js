@@ -106,6 +106,16 @@
         return "Good START→STOP pair.";
     }
 
+    function meaningSameBin(latest) {
+        if (!latest || latest.held || !latest.same_bin) {
+            return null;
+        }
+        if (Number(latest.dt_ns) !== 0) {
+            return null;
+        }
+        return "START and STOP in the same 4 ns bin (true 0 ns, or crosstalk).";
+    }
+
     function pad(n) {
         return (n < 10 ? "0" : "") + n;
     }
@@ -201,7 +211,11 @@
                     return body;
                 });
             })
-            .then(applyPinUi)
+            .then(function (payload) {
+                lastGood = null;
+                lastGoodAt = 0;
+                applyPinUi(payload);
+            })
             .catch(function (err) {
                 $("meaning").textContent = String(err.message || err);
             });
@@ -357,7 +371,7 @@
         var validOnly = $("validOnly").checked;
         var fpgaSeq = fpgaSeqOf(latest);
 
-        if (rawGood || (latest.held && latest.valid)) {
+        if ((rawGood || (latest.held && latest.valid)) && Number(latest.dt_ns) !== 0) {
             lastGood = latest;
             lastGoodAt = now;
         }
@@ -376,7 +390,15 @@
 
         $("dt").textContent = shownValid ? fmtNs(dtNs) : "—";
         $("seq").textContent = shownSeq !== null && shownSeq !== undefined ? String(shownSeq) : "—";
+        $("fpgaSeq").textContent = fpgaSeq !== null && !isNaN(fpgaSeq) ? String(fpgaSeq) : "—";
         $("flags").textContent = shownFlags.length ? shownFlags.join(", ") : "(none)";
+        $("latestFlags").textContent = flags.length ? flags.join(", ") : "(none)";
+        $("held").textContent = latest.held ? "yes" : "no";
+        $("sameBin").textContent = (show && show.same_bin) ? "yes" : "no";
+        var t0 = show ? show.t_start_ticks : null;
+        var t1 = show ? show.t_stop_ticks : null;
+        $("tStart").textContent = t0 !== undefined && t0 !== null ? String(t0) : "—";
+        $("tStop").textContent = t1 !== undefined && t1 !== null ? String(t1) : "—";
         $("armed").textContent = armed ? "yes — waiting for STOP" : "no";
 
         var age = show ? show.age_ms : null;
@@ -385,7 +407,10 @@
         }
         $("age").textContent = typeof age === "number" ? age.toFixed(1) + " ms" : "—";
 
-        if (latest.held || (validOnly && !rawGood)) {
+        var sameBinMsg = meaningSameBin(show === latest ? latest : show);
+        if (sameBinMsg) {
+            $("meaning").textContent = sameBinMsg;
+        } else if (latest.held || (validOnly && !rawGood)) {
             $("meaning").textContent = (lastGood || latest.held)
                 ? "Holding last valid pair. Latest FPGA result was not a delay."
                 : "Waiting for a valid START→STOP pair.";
@@ -415,6 +440,11 @@
                         "  seq=" + (seq !== null && seq !== undefined ? seq : fpgaSeq) +
                         "  " + fmtNs(shownValid ? dtNs : null) +
                         "  flags=" + (flags.length ? flags.join(",") : "-") +
+                        "  latest=" + (flags.length ? flags.join(",") : "-") +
+                        "  held=" + !!latest.held +
+                        "  same_bin=" + !!latest.same_bin +
+                        "  t=" + (latest.t_start_ticks != null ? latest.t_start_ticks : "-") +
+                        ".." + (latest.t_stop_ticks != null ? latest.t_stop_ticks : "-") +
                         "  armed=" + armed +
                         "\n";
                     var log = $("log");

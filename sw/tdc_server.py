@@ -111,6 +111,12 @@ def pack_snapshot(
     }
     if t_stop is not None:
         out["t_stop_ticks"] = int(t_stop) & 0xFFFFFFFF
+    out["same_bin"] = bool(
+        valid
+        and not flag_names
+        and t_stop is not None
+        and (int(t_start) & 0xFFFFFFFF) == (int(t_stop) & 0xFFFFFFFF)
+    )
     return out
 
 
@@ -180,6 +186,7 @@ class SimTdc(TdcDevice):
                 seq=self._seq,
                 dt_ticks=self._dt_ticks,
                 t_start=self._t_start,
+                t_stop=(self._t_start + self._dt_ticks) & 0xFFFFFFFF,
                 flags=self._flags,
                 age_ms=age_ms,
                 armed=False,
@@ -304,14 +311,15 @@ class FpgaTdc(TdcDevice):
             age_ms = (now - self._latch_mono) * 1000.0 if valid else None
 
             if is_good_pair(valid, flags):
-                self._last_good = {
-                    "seq": seq,
-                    "dt_ticks": raw["dt"],
-                    "t_start": raw["t_start"],
-                    "t_stop": raw["t_stop"],
-                    "flags": flags,
-                }
-                self._good_mono = now
+                if raw["dt"] != 0:
+                    self._last_good = {
+                        "seq": seq,
+                        "dt_ticks": raw["dt"],
+                        "t_start": raw["t_start"],
+                        "t_stop": raw["t_stop"],
+                        "flags": flags,
+                    }
+                    self._good_mono = now
                 return pack_snapshot(
                     valid=True,
                     seq=seq,

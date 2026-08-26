@@ -103,17 +103,9 @@ module tdc_timestamp #(
                     wait_ticks <= {COUNTER_W{1'b0}};
                     state      <= ST_ARMED;
                     armed      <= 1'b1;
-                end else if (stop_ev) begin
-                    seq                   <= seq + 32'd1;
-                    result_strobe         <= 1'b1;
-                    result_seq            <= seq + 32'd1;
-                    result_dt_ticks       <= 32'd0;
-                    result_t_start        <= ts_stop;
-                    result_t_stop         <= ts_stop;
-                    result_timeout        <= 1'b0;
-                    result_overflow       <= 1'b0;
-                    result_unmatched_stop <= 1'b1;
                 end
+                // STOP while idle is ignored. A leftover DDR beat of a wide
+                // STOP pulse must not overwrite the last good dt with 0.
             end else begin
                 armed      <= 1'b1;
                 wait_ticks <= wait_ticks + 32'd2;

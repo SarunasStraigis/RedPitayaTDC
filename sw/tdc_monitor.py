@@ -102,7 +102,13 @@ class Monitor(tk.Tk):
         self.status = tk.StringVar(value="Disconnected")
         self.dt = tk.StringVar(value="—")
         self.seq = tk.StringVar(value="—")
+        self.fpga_seq = tk.StringVar(value="—")
         self.flags = tk.StringVar(value="—")
+        self.latest_flags = tk.StringVar(value="—")
+        self.held = tk.StringVar(value="—")
+        self.same_bin = tk.StringVar(value="—")
+        self.t_start = tk.StringVar(value="—")
+        self.t_stop = tk.StringVar(value="—")
         self.armed = tk.StringVar(value="—")
         self.age = tk.StringVar(value="—")
         self.rate = tk.StringVar(value="—")
@@ -164,7 +170,13 @@ class Monitor(tk.Tk):
         grid.pack(fill=tk.X, **pad)
         rows = [
             ("seq", self.seq),
+            ("fpga seq", self.fpga_seq),
             ("flags", self.flags),
+            ("latest flags", self.latest_flags),
+            ("held", self.held),
+            ("same bin", self.same_bin),
+            ("t_start", self.t_start),
+            ("t_stop", self.t_stop),
             ("armed", self.armed),
             ("age", self.age),
             ("event rate", self.rate),
@@ -276,6 +288,7 @@ class Monitor(tk.Tk):
         if start == stop:
             self.meaning.set("START and STOP must be different pins.")
             return
+        self._last_good = None
         base = self.url.get().rstrip("/")
 
         def worker():
@@ -310,7 +323,7 @@ class Monitor(tk.Tk):
         armed = bool(latest.get("armed"))
         raw_good = is_raw_good(latest)
         fpga_seq = fpga_seq_of(latest)
-        if raw_good or (latest.get("held") and latest.get("valid")):
+        if (raw_good or (latest.get("held") and latest.get("valid"))) and latest.get("dt_ns") != 0:
             self._last_good = dict(latest)
             self._last_good["_seen"] = now
 
@@ -326,13 +339,28 @@ class Monitor(tk.Tk):
 
         self.dt.set(fmt_ns(dt_ns) if shown_valid else "—")
         self.seq.set(str(shown_seq) if shown_seq is not None else "—")
+        self.fpga_seq.set(str(fpga_seq) if fpga_seq is not None else "—")
         self.flags.set(", ".join(shown_flags) if shown_flags else "(none)")
+        self.latest_flags.set(", ".join(flags) if flags else "(none)")
+        self.held.set("yes" if latest.get("held") else "no")
+        self.same_bin.set("yes" if show and show.get("same_bin") else "no")
+        t0 = show.get("t_start_ticks") if show else None
+        t1 = show.get("t_stop_ticks") if show else None
+        self.t_start.set(str(t0) if t0 is not None else "—")
+        self.t_stop.set(str(t1) if t1 is not None else "—")
         self.armed.set("yes — waiting for STOP" if armed else "no")
         age = show.get("age_ms") if show else None
         if show is self._last_good and show is not latest and isinstance(show.get("_seen"), float):
             age = (now - show["_seen"]) * 1000.0
         self.age.set("%.1f ms" % age if isinstance(age, (int, float)) else "—")
-        if latest.get("held") or (self.valid_only.get() and not raw_good):
+        if (
+            show
+            and show.get("same_bin")
+            and show.get("dt_ns") == 0
+            and not show.get("held")
+        ):
+            self.meaning.set("START and STOP in the same 4 ns bin (true 0 ns, or crosstalk).")
+        elif latest.get("held") or (self.valid_only.get() and not raw_good):
             if self._last_good is None and not latest.get("held"):
                 self.meaning.set("Waiting for a valid START→STOP pair.")
             else:
@@ -354,11 +382,16 @@ class Monitor(tk.Tk):
 
             if self._last_seq is not None and fpga_seq != self._last_seq:
                 if (not self.valid_only.get()) or raw_good:
-                    line = "%s  seq=%s  %s  flags=%s  armed=%s\n" % (
+                    line = "%s  seq=%s  %s  flags=%s  latest=%s  held=%s  same_bin=%s  t=%s..%s  armed=%s\n" % (
                         time.strftime("%H:%M:%S"),
                         seq if seq is not None else fpga_seq,
                         fmt_ns(dt_ns if shown_valid else None),
+                        ",".join(shown_flags) if shown_flags else "-",
                         ",".join(flags) if flags else "-",
+                        bool(latest.get("held")),
+                        bool(show.get("same_bin") if show else False),
+                        latest.get("t_start_ticks", "-"),
+                        latest.get("t_stop_ticks", "-"),
                         armed,
                     )
                     self.log.config(state=tk.NORMAL)

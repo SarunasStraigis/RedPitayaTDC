@@ -87,8 +87,7 @@ class TdcTimestamp:
                 self.wait_ticks = 0
                 self.state = 1
                 self.armed = 1
-            elif stop_ev:
-                self._emit(0, ts_stop, ts_stop, 0, 0, 1)
+            # STOP while idle is ignored (leftover DDR beat must not clobber dt).
         else:
             self.armed = 1
             wait_n = (self.wait_ticks + 2) & 0xFFFFFFFF
@@ -197,11 +196,31 @@ def main() -> int:
     pulse_pair(dut, 2500000)
     expect_dt(dut, "10ms", 2500000, 0, 0)
 
-    print("=== unmatched STOP ===")
+    print("=== unmatched STOP is ignored ===")
+    prev_dt = dut.result_dt_ticks
+    prev_seq = dut.result_seq
     dut.stop_rise_r = 1
     dut.step()
     dut.stop_rise_r = 0
-    expect_dt(dut, "unmatched", 0, 0, 1)
+    wait_clks(dut, 4)
+    if dut.result_strobe:
+        raise AssertionError("unmatched STOP must not strobe")
+    if dut.result_dt_ticks != prev_dt or dut.result_seq != prev_seq:
+        raise AssertionError("unmatched STOP clobbered last dt/seq")
+    if dut.result_unmatched_stop:
+        raise AssertionError("unmatched flag must stay clear when STOP is ignored")
+    print("PASS unmatched ignored: dt=%d seq=%d" % (dut.result_dt_ticks, dut.result_seq))
+
+    print("=== leftover DDR STOP after good pair ===")
+    pulse_pair(dut, 5)
+    expect_dt(dut, "20ns-before-leftover", 5, 0, 0)
+    dut.stop_rise_f = 1
+    dut.step()
+    dut.stop_rise_f = 0
+    wait_clks(dut, 3)
+    if dut.result_dt_ticks != 5 or dut.result_unmatched_stop:
+        raise AssertionError("leftover STOP beat clobbered dt")
+    print("PASS leftover STOP: dt=%d" % dut.result_dt_ticks)
 
     print("=== timeout ===")
     dut.timeout_ticks = TIMEOUT_TICKS
