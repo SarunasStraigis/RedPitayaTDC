@@ -1,9 +1,10 @@
 # Pitaya TDC — Red Pitaya start/stop pulse interval
 
 Measure the time between two 3.3 V TTL rising edges (START then STOP) on a
-STEMlab 125-14, with **4 ns** resolution (meets &lt;5 ns) and a range of **0 ns to
-~17 s**. The FPGA keeps the latest interval in registers; you poll it over
-Ethernet with REST (or a one-shot UDP request).
+STEMlab 125-14. A 125 MHz coarse counter covers **0 ns to ~34 s**; a carry-chain
+interpolator locates each edge inside the 8 ns period (typical **~15–40 ps** LSB
+after calibration). The FPGA keeps the latest interval in registers; you poll
+it over Ethernet with REST (or a one-shot UDP request).
 
 This is **not** the Red Pitaya oscilloscope app. The ADC buffer is only ~16 kS
 (~131 µs at 125 MS/s), so a 1 ms delay cannot be timed that way at nanosecond
@@ -31,12 +32,13 @@ The web app (and `/api/pins`) can switch START/STOP among **DIO0–DIO3** (E1 pi
 A bitstream rebuild is required after this pin mux was added. Old overlays ignore `/api/pins`.
 
 - LVCMOS 3.3 V, rising-edge.
-- Pulse width at least ~8–10 ns so a 250 MHz flip-flop does not miss the edge.
+- Pulse width at least ~8–10 ns so a 125 MHz flip-flop does not miss the edge.
 - Optional 33–100 Ω series resistors at the connector.
 - 5 V TTL needs a level shifter; these pins are **not** 5 V tolerant.
 
-Same-cycle START and STOP (both edges in the same 4 ns bin) measures as **0 ns**.
-A STOP with no START, including the leftover DDR sample of a wide STOP pulse, is
+Same-cycle START and STOP (both edges in the same 8 ns coarse tick) have
+`dt_ticks = 0`; the interpolator still reports the sub-tick interval in `dt_ns`.
+A STOP with no START, including a leftover beat of a wide STOP pulse, is
 ignored so it cannot replace a real delay with 0 ns.
 
 ## Build the bitstream
@@ -56,8 +58,9 @@ source fpga/tcl/build.tcl
 ```
 
 The overlay is written to `fpga/output/tdc.bit`. It maps the TDC registers at
-**0x40000000** and uses FCLK0 at 125 MHz. START/STOP are sampled with IDDR on
-both clock edges, so the LSB is still **4 ns**.
+**0x40000000** and uses FCLK0 at 125 MHz. Each START/STOP edge launches a
+carry-chain delay line sampled by that clock (Nutt interpolator). `dt_ticks` is
+an 8 ns coarse count; `dt_ns` includes the calibrated fine codes.
 
 On Windows you can also run:
 
@@ -140,10 +143,10 @@ From the PC (PowerShell), with the board hostname or IP:
 
 ```powershell
 ssh root@rp-XXXX.local "mkdir -p /root/tdc"
-scp fpga\output\tdc.bit sw\tdc_server.py sw\tdc_regs.py sw\bit_to_bin.py root@rp-XXXX.local:/root/tdc/
+scp fpga\output\tdc.bit sw\tdc_server.py sw\tdc_regs.py sw\tdc_nutt.py sw\bit_to_bin.py root@rp-XXXX.local:/root/tdc/
 ```
 
-`tdc_server.py` needs `tdc_regs.py` in the same directory.
+`tdc_server.py` needs `tdc_regs.py` and `tdc_nutt.py` in the same directory.
 
 ### 2. Byte-swap and load via fpga_manager
 
@@ -233,6 +236,8 @@ curl "http://rp-XXXX.local:8080/api/wait?timeout_ms=1000"
 curl http://rp-XXXX.local:8080/api/health
 curl http://rp-XXXX.local:8080/api/pins
 curl -X PUT http://rp-XXXX.local:8080/api/pins -H "Content-Type: application/json" -d "{\"start\":8,\"stop\":9}"
+curl -X POST http://rp-XXXX.local:8080/api/calibrate -H "Content-Type: application/json" -d "{\"n\":5000}"
+curl http://rp-XXXX.local:8080/api/calibrate
 ```
 
 `GET /api/latest` always returns immediately:
@@ -241,9 +246,14 @@ curl -X PUT http://rp-XXXX.local:8080/api/pins -H "Content-Type: application/jso
 {
   "valid": true,
   "seq": 1234,
-  "dt_ns": 1000004.0,
-  "dt_ticks": 250001,
-  "clock_hz": 250000000,
+  "dt_ns": 1000004.123,
+  "dt_ps": 1000004123.0,
+  "dt_ticks": 125001,
+  "clock_hz": 125000000,
+  "fine_start": 210,
+  "fine_stop": 40,
+  "fine_bins": 512,
+  "calibrated": true,
   "flags": [],
   "age_ms": 12.0,
   "armed": false,
@@ -251,19 +261,20 @@ curl -X PUT http://rp-XXXX.local:8080/api/pins -H "Content-Type: application/jso
   "latest_flags": [],
   "held": false,
   "t_start_ticks": 1000,
-  "t_stop_ticks": 251001,
+  "t_stop_ticks": 126001,
   "same_bin": false
 }
 ```
 
 - `valid` is false until the first completed START→STOP pair (or timeout).
-- `dt_ns = dt_ticks * 1e9 / clock_hz` (4 ns per tick at 250 MHz).
+- `dt_ns` is the Nutt combination: `(t_stop - t_start) * Tclk - (t_fine_stop - t_fine_start)`. Use this, not `dt_ticks` alone.
+- `dt_ticks` is the signed coarse interval in **8 ns** (125 MHz) ticks.
+- `fine_start` / `fine_stop` are delay-line ones-counts. `calibrated` is true after a code-density LUT has been stored (`POST /api/calibrate`; file `/root/tdc/cal.json` on the Pitaya). Until then the server assumes equal tap widths.
 - `seq` increments on every completed event. If you poll slower than the pulses,
   you only see the **latest** interval; `seq` jumps by the number skipped.
 - `flags` may contain `timeout` or `overflow`. A STOP with no START is ignored
   and does not replace the last delay.
-- `same_bin` is true when `t_start_ticks == t_stop_ticks` on a good pair (true
-  0 ns, or both edges in the same 4 ns bin from crosstalk).
+- `same_bin` is true when coarse and fine timestamps match on a good pair.
 - `held` / `latest_flags` distinguish a live good pair from a previous one kept
   while the FPGA last wrote a non-delay result.
 - `GET /api/wait` blocks until `seq` changes or `timeout_ms` elapses (then the
@@ -292,7 +303,7 @@ Send any short datagram to UDP port **8081**; the reply is the same JSON as
 echo -n ping | nc -u -w1 rp-XXXX.local 8081
 ```
 
-## Splitter calibration
+## Splitter and interpolator calibration
 
 Channel-to-channel skew is a few nanoseconds of PCB/FPGA routing. Feed **one**
 3.3 V pulse to both START and STOP (SMA-T or a short wire tee), poll `dt_ns`,
@@ -302,26 +313,40 @@ and average a few dozen readings. That mean is the skew. Subtract it:
 python3 sw/tdc_server.py --skew-ns 4.0
 ```
 
-After calibration, a true 0 ns pair should read near 0.
+After the splitter cal, a true 0 ns pair should read near 0.
+
+The delay-line tap widths are not equal. With START/STOP already asynchronous
+to the 125 MHz clock, collect a code-density histogram:
+
+```bash
+curl -X POST http://rp-XXXX.local:8080/api/calibrate -H "Content-Type: application/json" -d "{\"n\":5000,\"timeout_s\":30}"
+```
+
+That writes `/root/tdc/cal.json` (override with `--cal-file`). Histogram pile-up
+on the last bin means the carry chain is shorter than 8 ns (rebuild with more
+taps); empty high bins means it is longer than a period (fine).
 
 ## Register map (0x40000000)
 
-| Off | Name      | Access | Notes                                      |
-|-----|-----------|--------|--------------------------------------------|
-| 00  | ID        | R      | `0x54444331` ("TDC1")                      |
-| 04  | CONTROL   | RW     | bit0 enable (default 1), bit1 pulse reset  |
-| 08  | STATUS    | R      | bit0 valid, bit1 armed, bit2 MMCM locked   |
-| 0C  | SEQ       | R      | measurement count                          |
-| 10  | DT_TICKS  | R      | signed interval in 250 MHz ticks           |
-| 14  | T_START   | R      | start timestamp                            |
-| 18  | T_STOP    | R      | stop timestamp                             |
-| 1C  | FLAGS     | R      | bit0 timeout, bit1 overflow, bit2 unmatched (unused; idle STOP is ignored) |
-| 20  | TIMEOUT   | RW     | timeout in ticks (default 500e6 = 2 s)     |
-| 24  | CLOCK_HZ  | R      | `250000000`                                |
-| 28  | PINS      | RW     | [3:0] START sel, [7:4] STOP sel, [31:16]=1 |
+| Off | Name       | Access | Notes                                      |
+|-----|------------|--------|--------------------------------------------|
+| 00  | ID         | R      | `0x54444331` ("TDC1")                      |
+| 04  | CONTROL    | RW     | bit0 enable (default 1), bit1 pulse reset  |
+| 08  | STATUS     | R      | bit0 valid, bit1 armed, bit2 MMCM locked   |
+| 0C  | SEQ        | R      | measurement count                          |
+| 10  | DT_TICKS   | R      | signed coarse interval in 125 MHz ticks    |
+| 14  | T_START    | R      | start coarse timestamp                     |
+| 18  | T_STOP     | R      | stop coarse timestamp                      |
+| 1C  | FLAGS      | R      | bit0 timeout, bit1 overflow, bit2 unmatched (unused; idle STOP is ignored) |
+| 20  | TIMEOUT    | RW     | timeout in 8 ns ticks (default 250e6 = 2 s)|
+| 24  | CLOCK_HZ   | R      | `125000000`                                |
+| 28  | PINS       | RW     | [3:0] START sel, [7:4] STOP sel, [31:16]=1 |
+| 2C  | FINE_START | R      | delay-line ones-count at START             |
+| 30  | FINE_STOP  | R      | delay-line ones-count at STOP              |
+| 34  | FINE_BINS  | R      | tap count (512)                            |
 
 Timeout `0` disables the watchdog. Overflow is latched if the 32-bit wait
-counter wraps (~17.2 s) while still armed.
+counter wraps (~34 s) while still armed.
 
 ## RTL simulation
 
@@ -335,12 +360,13 @@ bash fpga/sim/run_sim.sh
 powershell -File fpga/sim/run_sim.ps1
 ```
 
-The Verilog bench checks 0 ns, 4 ns, 20 ns, 1 ms, 10 ms, ignored unmatched STOP, leftover DDR STOP, and timeout.
+The Verilog benches check pairing (0 ns, 8 ns, 24 ns, 1 ms, 10 ms, ignored unmatched STOP, leftover STOP, timeout) and the ones-count encoder with injected thermometer codes.
 If Icarus is not installed, a cycle-accurate Python model of the same cases is:
 
 ```bash
 python fpga/sim/test_tdc_model.py
 python fpga/sim/test_tdc_edges.py
+python fpga/sim/test_tdc_nutt.py
 ```
 
 REST/UDP without hardware:
@@ -351,22 +377,28 @@ python sw/test_api.py
 
 ## Limits
 
-- Resolution is **4 ns**, not picoseconds. Absolute accuracy tracks the on-board
-  125 MHz oscillator (~ppm): about 1 ns of scale error per ppm over a 1 ms delay.
-- Range of the 32-bit counter at 250 MHz is ~17.2 s. Widen the counter in
+- Interpolator LSB is typically **~15–40 ps** on this Zynq-7010 -1; RMS after
+  code-density calibration is often **~10–30 ps**. Not 1 ps, not femtoseconds.
+- **Accuracy on long delays is the on-board 125 MHz crystal (~ppm), not the
+  delay line.** About 1 ns of scale error per ppm over a 1 ms delay. The
+  interpolator only refines the fraction of the last clock.
+- Range of the 32-bit coarse counter at 125 MHz is ~34 s. Widen the counter in
   `tdc_timestamp.v` if you need longer.
-- Raspberry Pi GPIO and Arduino timers cannot meet &lt;5 ns; this design is
-  FPGA-only.
+- Raspberry Pi GPIO and Arduino timers cannot meet nanosecond timing; this
+  design is FPGA-only.
 
 ## Layout
 
-- `fpga/rtl/tdc_timestamp.v` — 250 MHz dual-channel timestamp + pairing
-- `fpga/rtl/tdc_axi.v` — AXI-Lite last-result registers, IDDR-per-pin mux, 125 MHz TDC
-- `fpga/constr/stemlab_125_14.xdc` — E1 pinout
+- `fpga/rtl/tdc_delay_line.v` — CARRY4 tapped delay line (512 taps)
+- `fpga/rtl/tdc_encoder.v` — pipelined ones-count
+- `fpga/rtl/tdc_timestamp.v` — 125 MHz pairing FSM (coarse + fine bins)
+- `fpga/rtl/tdc_axi.v` — AXI-Lite last-result registers, pin mux, dual interpolators
+- `fpga/constr/stemlab_125_14.xdc` — E1 pinout and delay-line pblocks
 - `fpga/tcl/build.tcl` / `fpga/tcl/build.ps1` — Vivado batch build
 - `rp_app/pitaya_tdc/` — STEMlab web app (tile, Start/Stop, in-browser monitor)
 - `rp_app/install.ps1` / `rp_app/install.sh` — one-time copy onto the board
 - `sw/bit_to_bin.py` — `.bit` → byte-swapped `.bin` for `fpga_manager`
+- `sw/tdc_nutt.py` — Nutt combine + code-density LUT
 - `sw/tdc_server.py` — REST + UDP on the Pitaya (one instance on :8080)
 - `sw/tdc_poll.py` — PC helper
 - `sw/tdc_monitor.py` — PC GUI (`--url http://rp-XXXX.local:8080`)

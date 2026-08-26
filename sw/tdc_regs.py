@@ -1,8 +1,9 @@
 """Memory-mapped register map for the TDC AXI slave (base 0x40000000)."""
 
 ID_VALUE = 0x54444331  # "TDC1"
-DEFAULT_CLOCK_HZ = 250_000_000
-DEFAULT_TIMEOUT_TICKS = 500_000_000  # 2 s @ 250 MHz
+DEFAULT_CLOCK_HZ = 125_000_000
+DEFAULT_TIMEOUT_TICKS = 250_000_000  # 2 s @ 125 MHz
+DEFAULT_FINE_BINS = 512
 DEFAULT_BASE = 0x40000000
 MAP_SIZE = 4096
 
@@ -17,6 +18,9 @@ ADDR_FLAGS = 0x1C
 ADDR_TIMEOUT = 0x20
 ADDR_CLOCK_HZ = 0x24
 ADDR_PINS = 0x28
+ADDR_FINE_START = 0x2C
+ADDR_FINE_STOP = 0x30
+ADDR_FINE_BINS = 0x34
 
 CTRL_ENABLE = 1 << 0
 CTRL_SOFT_RESET = 1 << 1
@@ -67,11 +71,20 @@ def is_good_pair(valid: bool, flags: int) -> bool:
     return bool(valid) and (int(flags) & BAD_FLAG_MASK) == 0
 
 
-def same_bin_pair(valid: bool, flags: int, t_start: int, t_stop: int) -> bool:
-    """True when a good pair has identical start/stop timestamps (0 ns / same 4 ns bin)."""
+def same_bin_pair(
+    valid: bool,
+    flags: int,
+    t_start: int,
+    t_stop: int,
+    fine_start: int = 0,
+    fine_stop: int = 0,
+) -> bool:
+    """True when a good pair has identical coarse and fine timestamps."""
     if not is_good_pair(valid, flags):
         return False
-    return (int(t_start) & 0xFFFFFFFF) == (int(t_stop) & 0xFFFFFFFF)
+    if (int(t_start) & 0xFFFFFFFF) != (int(t_stop) & 0xFFFFFFFF):
+        return False
+    return int(fine_start) == int(fine_stop)
 
 
 def pin_label(entry: dict) -> str:

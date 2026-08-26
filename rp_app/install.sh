@@ -17,7 +17,7 @@ rw >/dev/null 2>&1 || mount -o remount,rw /opt/redpitaya
 rm -rf /opt/redpitaya/www/apps/femto_tdc
 mkdir -p "$DEST/fpga"
 cp -a "$APP_SRC/." "$DEST/"
-cp "$REPO/sw/tdc_server.py" "$REPO/sw/tdc_regs.py" "$REPO/sw/bit_to_bin.py" "$DEST/"
+cp "$REPO/sw/tdc_server.py" "$REPO/sw/tdc_regs.py" "$REPO/sw/tdc_nutt.py" "$REPO/sw/bit_to_bin.py" "$DEST/"
 cp "$BIT" "$DEST/fpga/tdc.bit"
 python3 "$DEST/info/make_icon.py"
 cp "$DEST/info/icon.png" "$DEST/icon.png"

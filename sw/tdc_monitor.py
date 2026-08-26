@@ -44,10 +44,10 @@ def fmt_ns(dt_ns) -> str:
         return str(dt_ns)
     av = abs(v)
     if av >= 1e6:
-        return "%.3f ms" % (v / 1e6)
+        return "%.6f ms" % (v / 1e6)
     if av >= 1e3:
         return "%.3f µs" % (v / 1e3)
-    return "%.1f ns" % v
+    return "%.3f ns" % v
 
 
 BAD_FLAGS = ("unmatched_stop", "timeout", "overflow")
@@ -359,7 +359,7 @@ class Monitor(tk.Tk):
             and show.get("dt_ns") == 0
             and not show.get("held")
         ):
-            self.meaning.set("START and STOP in the same 4 ns bin (true 0 ns, or crosstalk).")
+            self.meaning.set("START and STOP in the same coarse tick and interpolator bin (true 0 ns, or crosstalk).")
         elif latest.get("held") or (self.valid_only.get() and not raw_good):
             if self._last_good is None and not latest.get("held"):
                 self.meaning.set("Waiting for a valid START→STOP pair.")

@@ -34,6 +34,8 @@ create_project tdc $proj_dir -part xc7z010clg400-1 -force
 set_property target_language Verilog [current_project]
 
 add_files -norecurse [list \
+    [file join $rtl_dir tdc_delay_line.v] \
+    [file join $rtl_dir tdc_encoder.v] \
     [file join $rtl_dir tdc_timestamp.v] \
     [file join $rtl_dir tdc_axi.v] \
 ]
@@ -94,14 +96,27 @@ add_files -norecurse $wrapper
 set_property top system_wrapper [current_fileset]
 update_compile_order -fileset sources_1
 
-# Keep synth/impl reproducible enough for a lab bitstream.
-set_property STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY rebuilt [get_runs synth_1]
+# Synthesize tdc_axi with the top (not OOC). Otherwise u_tdl_* is a black box
+# at synth POST / XDC parse and the TDL false_path never applies (WNS ~ -12 ns).
+set_property synth_checkpoint_mode None [get_files system.bd]
+
+# Do not flatten the carry-chain interpolators.
+set_property STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY none [get_runs synth_1]
+catch {add_files -fileset utils_1 -norecurse [file join $tcl_dir synth_post.tcl]}
+set_property STEPS.SYNTH_DESIGN.TCL.POST [file join $tcl_dir synth_post.tcl] [get_runs synth_1]
+set_property STEPS.OPT_DESIGN.TCL.PRE [file join $tcl_dir synth_post.tcl] [get_runs impl_1]
 
 launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1
 
 if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
     error "Implementation failed"
+}
+
+set wns [get_property STATS.WNS [get_runs impl_1]]
+puts "impl_1 WNS=$wns"
+if {![string is double -strict $wns] || $wns < 0.0} {
+    error "Timing failed: WNS=$wns (TDL must be false-pathed; edge FFs must close)"
 }
 
 set bitfile [lindex [glob -nocomplain [file join $proj_dir tdc.runs impl_1 *.bit]] 0]

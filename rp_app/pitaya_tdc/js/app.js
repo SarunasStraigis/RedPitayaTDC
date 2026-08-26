@@ -35,12 +35,12 @@
         }
         var av = Math.abs(v);
         if (av >= 1e6) {
-            return (v / 1e6).toFixed(3) + " ms";
+            return (v / 1e6).toFixed(6) + " ms";
         }
         if (av >= 1e3) {
             return (v / 1e3).toFixed(3) + " µs";
         }
-        return v.toFixed(1) + " ns";
+        return v.toFixed(3) + " ns";
     }
 
     function latestFlags(latest) {
@@ -113,7 +113,7 @@
         if (Number(latest.dt_ns) !== 0) {
             return null;
         }
-        return "START and STOP in the same 4 ns bin (true 0 ns, or crosstalk).";
+        return "START and STOP in the same coarse tick and interpolator bin (true 0 ns, or crosstalk).";
     }
 
     function pad(n) {

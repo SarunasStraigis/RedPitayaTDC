@@ -1,10 +1,16 @@
 // AXI-Lite last-result slave wrapping tdc_timestamp.
-// TDC runs on FCLK0 (125 MHz). IDDR samples START/STOP on both edges (4 ns bins).
+// TDC runs on FCLK0 (125 MHz). Carry-chain interpolators timestamp each edge
+// inside the 8 ns period; software combines coarse + fine (Nutt).
+
+`timescale 1ns / 1ps
 
 module tdc_axi #(
-    parameter [31:0] CLOCK_HZ         = 32'd250000000,
+    parameter [31:0] CLOCK_HZ         = 32'd125000000,
     parameter [31:0] ID_VALUE         = 32'h54444331,  // "TDC1"
-    parameter [31:0] DEFAULT_TIMEOUT  = 32'd500000000  // 2 s @ 250 MHz
+    parameter [31:0] DEFAULT_TIMEOUT  = 32'd250000000, // 2 s @ 125 MHz
+    parameter        NUM_TAPS         = 512,
+    parameter        ENC_LAT          = 4,
+    parameter        FINE_W           = 16
 ) (
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)
     (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME s_axi_aclk, ASSOCIATED_BUSIF S_AXI, ASSOCIATED_RESET s_axi_aresetn, FREQ_HZ 125000000" *)
@@ -56,17 +62,20 @@ module tdc_axi #(
     input  wire [9:0]  dio_i
 );
 
-    localparam ADDR_ID       = 8'h00;
-    localparam ADDR_CONTROL  = 8'h04;
-    localparam ADDR_STATUS   = 8'h08;
-    localparam ADDR_SEQ      = 8'h0C;
-    localparam ADDR_DT_TICKS = 8'h10;
-    localparam ADDR_T_START  = 8'h14;
-    localparam ADDR_T_STOP   = 8'h18;
-    localparam ADDR_FLAGS    = 8'h1C;
-    localparam ADDR_TIMEOUT  = 8'h20;
-    localparam ADDR_CLOCK_HZ = 8'h24;
-    localparam ADDR_PINS     = 8'h28;
+    localparam ADDR_ID         = 8'h00;
+    localparam ADDR_CONTROL    = 8'h04;
+    localparam ADDR_STATUS     = 8'h08;
+    localparam ADDR_SEQ        = 8'h0C;
+    localparam ADDR_DT_TICKS   = 8'h10;
+    localparam ADDR_T_START    = 8'h14;
+    localparam ADDR_T_STOP     = 8'h18;
+    localparam ADDR_FLAGS      = 8'h1C;
+    localparam ADDR_TIMEOUT    = 8'h20;
+    localparam ADDR_CLOCK_HZ   = 8'h24;
+    localparam ADDR_PINS       = 8'h28;
+    localparam ADDR_FINE_START = 8'h2C;
+    localparam ADDR_FINE_STOP  = 8'h30;
+    localparam ADDR_FINE_BINS  = 8'h34;
 
     localparam FLAG_TIMEOUT  = 32'd1;
     localparam FLAG_OVERFLOW = 32'd2;
@@ -168,16 +177,19 @@ module tdc_axi #(
     assign s_axi_rdata   = rdata_r;
     assign s_axi_rresp   = 2'b00;
 
-    // Last result in AXI clock domain (filled by CDC)
     reg        axi_valid;
     reg        axi_armed;
     reg [31:0] axi_seq;
     reg [31:0] axi_dt_ticks;
     reg [31:0] axi_t_start;
     reg [31:0] axi_t_stop;
+    reg [15:0] axi_fine_start;
+    reg [15:0] axi_fine_stop;
     reg        axi_flag_timeout;
     reg        axi_flag_overflow;
     reg        axi_flag_unmatch;
+    reg        seq_pending;
+    reg [31:0] seq_hold;
 
     wire [31:0] flags_word = {29'd0, axi_flag_unmatch, axi_flag_overflow, axi_flag_timeout};
 
@@ -200,18 +212,21 @@ module tdc_axi #(
                 ar_ok    <= 1'b0;
                 rvalid_r <= 1'b1;
                 case (araddr_r)
-                    ADDR_ID:       rdata_r <= ID_VALUE;
-                    ADDR_CONTROL:  rdata_r <= {30'd0, 1'b0, ctrl_enable};
-                    ADDR_STATUS:   rdata_r <= status_word;
-                    ADDR_SEQ:      rdata_r <= axi_seq;
-                    ADDR_DT_TICKS: rdata_r <= axi_dt_ticks;
-                    ADDR_T_START:  rdata_r <= axi_t_start;
-                    ADDR_T_STOP:   rdata_r <= axi_t_stop;
-                    ADDR_FLAGS:    rdata_r <= flags_word;
-                    ADDR_TIMEOUT:  rdata_r <= timeout_axi;
-                    ADDR_CLOCK_HZ: rdata_r <= CLOCK_HZ;
-                    ADDR_PINS:     rdata_r <= {PINS_CAP, 8'd0, pin_stop, pin_start};
-                    default:       rdata_r <= 32'd0;
+                    ADDR_ID:         rdata_r <= ID_VALUE;
+                    ADDR_CONTROL:    rdata_r <= {30'd0, 1'b0, ctrl_enable};
+                    ADDR_STATUS:     rdata_r <= status_word;
+                    ADDR_SEQ:        rdata_r <= axi_seq;
+                    ADDR_DT_TICKS:   rdata_r <= axi_dt_ticks;
+                    ADDR_T_START:    rdata_r <= axi_t_start;
+                    ADDR_T_STOP:     rdata_r <= axi_t_stop;
+                    ADDR_FLAGS:      rdata_r <= flags_word;
+                    ADDR_TIMEOUT:    rdata_r <= timeout_axi;
+                    ADDR_CLOCK_HZ:   rdata_r <= CLOCK_HZ;
+                    ADDR_PINS:       rdata_r <= {PINS_CAP, 8'd0, pin_stop, pin_start};
+                    ADDR_FINE_START: rdata_r <= {16'd0, axi_fine_start};
+                    ADDR_FINE_STOP:  rdata_r <= {16'd0, axi_fine_stop};
+                    ADDR_FINE_BINS:  rdata_r <= NUM_TAPS;
+                    default:         rdata_r <= 32'd0;
                 endcase
             end
 
@@ -221,98 +236,151 @@ module tdc_axi #(
     end
 
     // -------------------------------------------------------------------------
-    // IDDR capture at 125 MHz (4 ns bins) and same-clock TDC
+    // Async pin mux → carry-chain TDL + SDR edge detect, encoder-aligned
     // -------------------------------------------------------------------------
-    // AXI reset clears IDDR. Pin-change / soft reset only restarts the pairing
-    // FSM and preloads the edge-detect delay flops so idle-high TTL does not
-    // look like a rising edge.
-    reg rst_axi_d;
+    reg rst_cap_d;
     reg rst_fsm_d;
     reg [1:0] holdoff_cnt;
     always @(posedge clk_125) begin
-        rst_axi_d <= ~s_axi_aresetn;
+        rst_cap_d <= ~s_axi_aresetn;
         rst_fsm_d <= (~s_axi_aresetn) | soft_reset_pulse;
         if ((~s_axi_aresetn) | soft_reset_pulse | rst_fsm_d)
             holdoff_cnt <= 2'd3;
         else if (holdoff_cnt != 2'd0)
             holdoff_cnt <= holdoff_cnt - 2'd1;
     end
-    wire iddr_rst     = rst_axi_d;
+    wire cap_rst      = rst_cap_d;
     wire fsm_rst      = rst_fsm_d;
     wire edge_holdoff = rst_fsm_d | (holdoff_cnt != 2'd0);
 
-    wire [9:0] dio_q1;
-    wire [9:0] dio_q2;
+    (* DONT_TOUCH = "true" *) reg start_hit;
+    (* DONT_TOUCH = "true" *) reg stop_hit;
+    always @(*) begin
+        case (pin_start)
+            4'd0: start_hit = dio_i[0];
+            4'd1: start_hit = dio_i[1];
+            4'd2: start_hit = dio_i[2];
+            4'd3: start_hit = dio_i[3];
+            4'd4: start_hit = dio_i[4];
+            4'd5: start_hit = dio_i[5];
+            4'd6: start_hit = dio_i[6];
+            4'd7: start_hit = dio_i[7];
+            4'd8: start_hit = dio_i[8];
+            4'd9: start_hit = dio_i[9];
+            default: start_hit = dio_i[8];
+        endcase
+        case (pin_stop)
+            4'd0: stop_hit = dio_i[0];
+            4'd1: stop_hit = dio_i[1];
+            4'd2: stop_hit = dio_i[2];
+            4'd3: stop_hit = dio_i[3];
+            4'd4: stop_hit = dio_i[4];
+            4'd5: stop_hit = dio_i[5];
+            4'd6: stop_hit = dio_i[6];
+            4'd7: stop_hit = dio_i[7];
+            4'd8: stop_hit = dio_i[8];
+            4'd9: stop_hit = dio_i[9];
+            default: stop_hit = dio_i[9];
+        endcase
+    end
 
-`ifdef SIM
-    assign dio_q1 = dio_i;
-    assign dio_q2 = dio_i;
-`else
-    genvar gi;
-    generate
-        for (gi = 0; gi < 10; gi = gi + 1) begin : g_iddr
-            IDDR #(
-                .DDR_CLK_EDGE ("SAME_EDGE_PIPELINED"),
-                .INIT_Q1      (1'b0),
-                .INIT_Q2      (1'b0),
-                .SRTYPE       ("SYNC")
-            ) iddr_dio (
-                .Q1 (dio_q1[gi]),
-                .Q2 (dio_q2[gi]),
-                .C  (clk_125),
-                .CE (1'b1),
-                .D  (dio_i[gi]),
-                .R  (iddr_rst),
-                .S  (1'b0)
-            );
-        end
-    endgenerate
-`endif
+    // Separate TDL feed so the carry chain is not timed with the edge FFs.
+    (* DONT_TOUCH = "true" *) wire start_hit_tdl = start_hit;
+    (* DONT_TOUCH = "true" *) wire stop_hit_tdl  = stop_hit;
 
-    wire start_q1 = dio_q1[pin_start];
-    wire start_q2 = dio_q2[pin_start];
-    wire stop_q1  = dio_q1[pin_stop];
-    wire stop_q2  = dio_q2[pin_stop];
+    wire [NUM_TAPS-1:0] start_thermo;
+    wire [NUM_TAPS-1:0] stop_thermo;
+    wire [FINE_W-1:0]   start_fine_enc;
+    wire [FINE_W-1:0]   stop_fine_enc;
 
-    reg start_q1_d, start_q2_d, stop_q1_d, stop_q2_d;
+    tdc_delay_line #(.NUM_TAPS(NUM_TAPS)) u_tdl_start (
+        .clk    (clk_125),
+        .rst    (cap_rst),
+        .hit    (start_hit_tdl),
+        .thermo (start_thermo)
+    );
+
+    tdc_delay_line #(.NUM_TAPS(NUM_TAPS)) u_tdl_stop (
+        .clk    (clk_125),
+        .rst    (cap_rst),
+        .hit    (stop_hit_tdl),
+        .thermo (stop_thermo)
+    );
+
+    tdc_encoder #(.NUM_TAPS(NUM_TAPS), .OUT_W(FINE_W)) u_enc_start (
+        .clk    (clk_125),
+        .rst    (fsm_rst),
+        .thermo (start_thermo),
+        .count  (start_fine_enc)
+    );
+
+    tdc_encoder #(.NUM_TAPS(NUM_TAPS), .OUT_W(FINE_W)) u_enc_stop (
+        .clk    (clk_125),
+        .rst    (fsm_rst),
+        .thermo (stop_thermo),
+        .count  (stop_fine_enc)
+    );
+
+    reg        start_q;
+    reg        stop_q;
+    reg        start_rise_c;
+    reg        stop_rise_c;
+    reg [31:0] coarse;
+    reg [31:0] cap_ts;
+
+    wire [31:0] coarse_next = coarse + 32'd1;
+
     always @(posedge clk_125) begin
-        if (iddr_rst) begin
-            start_q1_d <= 1'b0;
-            start_q2_d <= 1'b0;
-            stop_q1_d  <= 1'b0;
-            stop_q2_d  <= 1'b0;
+        if (cap_rst) begin
+            start_q      <= 1'b0;
+            stop_q       <= 1'b0;
+            start_rise_c <= 1'b0;
+            stop_rise_c  <= 1'b0;
+            coarse       <= 32'd0;
+            cap_ts       <= 32'd0;
+        end else if (edge_holdoff) begin
+            start_q      <= start_hit;
+            stop_q       <= stop_hit;
+            start_rise_c <= 1'b0;
+            stop_rise_c  <= 1'b0;
+            coarse       <= coarse_next;
+            cap_ts       <= coarse_next;
         end else begin
-            // Follow the live samples during fsm_rst (pin change) so the
-            // first cycle after holdoff is not 0→1 from a high idle level.
-            start_q1_d <= start_q1;
-            start_q2_d <= start_q2;
-            stop_q1_d  <= stop_q1;
-            stop_q2_d  <= stop_q2;
+            start_q      <= start_hit;
+            stop_q       <= stop_hit;
+            start_rise_c <= start_hit & ~start_q;
+            stop_rise_c  <= stop_hit  & ~stop_q;
+            coarse       <= coarse_next;
+            cap_ts       <= coarse_next;
         end
     end
 
-    wire start_raw_r = start_q1 & ~start_q1_d;
-    wire start_raw_f = start_q2 & ~start_q2_d;
-    wire stop_raw_r  = stop_q1  & ~stop_q1_d;
-    wire stop_raw_f  = stop_q2  & ~stop_q2_d;
-
-    // One physical TTL rise can appear as Q2 then Q1 on consecutive cycles.
-    // Keep the first beat; drop the complementary leftover.
-    reg start_ev_d, stop_ev_d;
-    wire start_rise_r = start_raw_r & ~start_ev_d & ~edge_holdoff;
-    wire start_rise_f = start_raw_f & ~start_ev_d & ~edge_holdoff;
-    wire stop_rise_r  = stop_raw_r  & ~stop_ev_d  & ~edge_holdoff;
-    wire stop_rise_f  = stop_raw_f  & ~stop_ev_d  & ~edge_holdoff;
+    reg [ENC_LAT-1:0] start_rise_pipe;
+    reg [ENC_LAT-1:0] stop_rise_pipe;
+    reg [31:0]        ts_pipe [0:ENC_LAT-1];
+    integer           pi;
 
     always @(posedge clk_125) begin
         if (fsm_rst) begin
-            start_ev_d <= 1'b0;
-            stop_ev_d  <= 1'b0;
+            start_rise_pipe <= {ENC_LAT{1'b0}};
+            stop_rise_pipe  <= {ENC_LAT{1'b0}};
+            for (pi = 0; pi < ENC_LAT; pi = pi + 1)
+                ts_pipe[pi] <= 32'd0;
         end else begin
-            start_ev_d <= start_rise_r | start_rise_f;
-            stop_ev_d  <= stop_rise_r  | stop_rise_f;
+            start_rise_pipe[0] <= start_rise_c;
+            stop_rise_pipe[0]  <= stop_rise_c;
+            ts_pipe[0]         <= cap_ts;
+            for (pi = 1; pi < ENC_LAT; pi = pi + 1) begin
+                start_rise_pipe[pi] <= start_rise_pipe[pi - 1];
+                stop_rise_pipe[pi]  <= stop_rise_pipe[pi - 1];
+                ts_pipe[pi]         <= ts_pipe[pi - 1];
+            end
         end
     end
+
+    wire        start_rise_al = start_rise_pipe[ENC_LAT-1];
+    wire        stop_rise_al  = stop_rise_pipe[ENC_LAT-1];
+    wire [31:0] ts_now        = ts_pipe[ENC_LAT-1];
 
     wire        core_armed;
     wire        core_strobe;
@@ -320,18 +388,24 @@ module tdc_axi #(
     wire [31:0] core_dt;
     wire [31:0] core_t_start;
     wire [31:0] core_t_stop;
+    wire [FINE_W-1:0] core_fine_start;
+    wire [FINE_W-1:0] core_fine_stop;
     wire        core_timeout;
     wire        core_overflow;
     wire        core_unmatch;
 
-    tdc_timestamp u_core (
+    tdc_timestamp #(
+        .COUNTER_W (32),
+        .FINE_W    (FINE_W)
+    ) u_core (
         .clk                   (clk_125),
         .rst                   (fsm_rst),
         .enable                (ctrl_enable),
-        .start_rise_r          (start_rise_r),
-        .start_rise_f          (start_rise_f),
-        .stop_rise_r           (stop_rise_r),
-        .stop_rise_f           (stop_rise_f),
+        .start_rise            (start_rise_al),
+        .stop_rise             (stop_rise_al),
+        .ts_now                (ts_now),
+        .start_fine            (start_fine_enc),
+        .stop_fine             (stop_fine_enc),
         .timeout_ticks         (timeout_axi),
         .armed                 (core_armed),
         .result_strobe         (core_strobe),
@@ -339,6 +413,8 @@ module tdc_axi #(
         .result_dt_ticks       (core_dt),
         .result_t_start        (core_t_start),
         .result_t_stop         (core_t_stop),
+        .result_fine_start     (core_fine_start),
+        .result_fine_stop      (core_fine_stop),
         .result_timeout        (core_timeout),
         .result_overflow       (core_overflow),
         .result_unmatched_stop (core_unmatch)
@@ -351,25 +427,37 @@ module tdc_axi #(
             axi_dt_ticks      <= 32'd0;
             axi_t_start       <= 32'd0;
             axi_t_stop        <= 32'd0;
+            axi_fine_start    <= 16'd0;
+            axi_fine_stop     <= 16'd0;
             axi_flag_timeout  <= 1'b0;
             axi_flag_overflow <= 1'b0;
             axi_flag_unmatch  <= 1'b0;
             axi_armed         <= 1'b0;
+            seq_pending       <= 1'b0;
+            seq_hold          <= 32'd0;
         end else begin
-            axi_armed <= core_armed;
+            axi_armed   <= core_armed;
+            seq_pending <= 1'b0;
             if (core_strobe) begin
                 axi_valid         <= 1'b1;
-                axi_seq           <= core_seq;
                 axi_dt_ticks      <= core_dt;
                 axi_t_start       <= core_t_start;
                 axi_t_stop        <= core_t_stop;
+                axi_fine_start    <= core_fine_start[15:0];
+                axi_fine_stop     <= core_fine_stop[15:0];
                 axi_flag_timeout  <= core_timeout;
                 axi_flag_overflow <= core_overflow;
                 axi_flag_unmatch  <= core_unmatch;
+                seq_hold          <= core_seq;
+                seq_pending       <= 1'b1;
             end
+            // Publish SEQ one cycle after payload so a reader that sees a
+            // new SEQ already has stable t_start/t_stop/fines.
+            if (seq_pending)
+                axi_seq <= seq_hold;
         end
     end
 
-    wire _unused = |{s_axi_awprot, s_axi_arprot};
+    wire _unused = |{s_axi_awprot, s_axi_arprot, timeout_written};
 
 endmodule

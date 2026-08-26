@@ -26,7 +26,7 @@ if (-not (Test-Path $Bit)) {
     throw "Missing $Bit. Build first: powershell -File fpga\tcl\build.ps1"
 }
 
-foreach ($name in @("tdc_server.py", "tdc_regs.py", "bit_to_bin.py")) {
+foreach ($name in @("tdc_server.py", "tdc_regs.py", "tdc_nutt.py", "bit_to_bin.py")) {
     $p = Join-Path $Repo "sw\$name"
     if (-not (Test-Path $p)) {
         throw "Missing $p"
@@ -42,6 +42,7 @@ Get-ChildItem $stage -Recurse -Directory -Filter __pycache__ -ErrorAction Silent
     Remove-Item -Recurse -Force
 Copy-Item (Join-Path $Repo "sw\tdc_server.py") $stage -Force
 Copy-Item (Join-Path $Repo "sw\tdc_regs.py") $stage -Force
+Copy-Item (Join-Path $Repo "sw\tdc_nutt.py") $stage -Force
 Copy-Item (Join-Path $Repo "sw\bit_to_bin.py") $stage -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $stage "fpga") | Out-Null
 Copy-Item $Bit (Join-Path $stage "fpga\tdc.bit") -Force

@@ -19,4 +19,6 @@ rp_app/pitaya_tdc/fpga/*.bit
 rp_app/pitaya_tdc/fpga/*.bin
 rp_app/pitaya_tdc/tdc_server.py
 rp_app/pitaya_tdc/tdc_regs.py
+rp_app/pitaya_tdc/tdc_nutt.py
 rp_app/pitaya_tdc/bit_to_bin.py
+sw/tdc_cal.json
