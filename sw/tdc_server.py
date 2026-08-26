@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""Poll the latest START/STOP interval from a Red Pitaya TDC (REST + optional UDP)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import mmap
+import os
+import struct
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import UDPServer, BaseRequestHandler, ThreadingMixIn
+from typing import Optional
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tdc_regs import (
+    ADDR_CLOCK_HZ,
+    ADDR_CONTROL,
+    ADDR_DT_TICKS,
+    ADDR_FLAGS,
+    ADDR_ID,
+    ADDR_SEQ,
+    ADDR_STATUS,
+    ADDR_T_START,
+    ADDR_T_STOP,
+    ADDR_TIMEOUT,
+    CTRL_ENABLE,
+    DEFAULT_BASE,
+    DEFAULT_CLOCK_HZ,
+    ID_VALUE,
+    MAP_SIZE,
+    STATUS_ARMED,
+    STATUS_MMCM_LOCKED,
+    STATUS_VALID,
+    flags_to_names,
+)
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class ThreadingUDPServer(ThreadingMixIn, UDPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def ticks_to_ns(dt_ticks: int, clock_hz: int) -> float:
+    if clock_hz <= 0:
+        return 0.0
+    return dt_ticks * 1e9 / clock_hz
+
+
+class TdcDevice:
+    def snapshot(self) -> dict:
+        raise NotImplementedError
+
+    def health(self) -> dict:
+        raise NotImplementedError
+
+
+class SimTdc(TdcDevice):
+    """Software stand-in so the REST API can be exercised without a bitstream."""
+
+    def __init__(self, period_s: float = 0.01, dt_ns: float = 1_000_000.0, clock_hz: int = DEFAULT_CLOCK_HZ):
+        self.clock_hz = clock_hz
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._valid = False
+        self._dt_ticks = 0
+        self._t_start = 0
+        self._flags = 0
+        self._enable = True
+        self._latch_mono = time.monotonic()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, args=(period_s, dt_ns), daemon=True)
+        self._thread.start()
+
+    def _run(self, period_s: float, dt_ns: float) -> None:
+        dt_ticks = int(round(dt_ns * self.clock_hz / 1e9))
+        while not self._stop.wait(period_s):
+            with self._lock:
+                if not self._enable:
+                    continue
+                self._seq += 1
+                self._valid = True
+                self._dt_ticks = dt_ticks
+                self._t_start = (self._seq * 1000) & 0xFFFFFFFF
+                self._flags = 0
+                self._latch_mono = time.monotonic()
+
+    def close(self) -> None:
+        self._stop.set()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            age_ms = (time.monotonic() - self._latch_mono) * 1000.0 if self._valid else None
+            return self._pack(
+                valid=self._valid,
+                seq=self._seq,
+                dt_ticks=self._dt_ticks,
+                t_start=self._t_start,
+                flags=self._flags,
+                age_ms=age_ms,
+                armed=False,
+            )
+
+    def health(self) -> dict:
+        with self._lock:
+            return {
+                "ok": True,
+                "id": "TDC1",
+                "clock_hz": self.clock_hz,
+                "enable": self._enable,
+                "mmcm_locked": True,
+                "armed": False,
+                "valid": self._valid,
+                "sim": True,
+            }
+
+    def _pack(self, valid, seq, dt_ticks, t_start, flags, age_ms, armed) -> dict:
+        signed = dt_ticks if dt_ticks < 0x80000000 else dt_ticks - 0x100000000
+        return {
+            "valid": bool(valid),
+            "seq": int(seq),
+            "dt_ticks": signed,
+            "dt_ns": ticks_to_ns(signed, self.clock_hz) if valid else None,
+            "t_start_ticks": int(t_start) & 0xFFFFFFFF,
+            "clock_hz": self.clock_hz,
+            "flags": flags_to_names(flags),
+            "age_ms": None if age_ms is None else round(age_ms, 3),
+            "armed": bool(armed),
+        }
+
+
+class FpgaTdc(TdcDevice):
+    def __init__(self, base: int = DEFAULT_BASE):
+        self.base = base
+        self._fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+        self._mem = mmap.mmap(
+            self._fd,
+            MAP_SIZE,
+            mmap.MAP_SHARED,
+            mmap.PROT_READ | mmap.PROT_WRITE,
+            offset=base,
+        )
+        ident = self._read_u32(ADDR_ID)
+        if ident != ID_VALUE:
+            raise RuntimeError(
+                "TDC ID register is 0x%08X (expected 0x%08X). Is the bitstream loaded?" % (ident, ID_VALUE)
+            )
+        self.clock_hz = self._read_u32(ADDR_CLOCK_HZ) or DEFAULT_CLOCK_HZ
+        self._last_seq: Optional[int] = None
+        self._latch_mono = time.monotonic()
+
+    def close(self) -> None:
+        try:
+            self._mem.close()
+        finally:
+            os.close(self._fd)
+
+    def _read_u32(self, off: int) -> int:
+        return struct.unpack_from("<I", self._mem, off)[0]
+
+    def _read_i32(self, off: int) -> int:
+        return struct.unpack_from("<i", self._mem, off)[0]
+
+    def _write_u32(self, off: int, value: int) -> None:
+        struct.pack_into("<I", self._mem, off, value & 0xFFFFFFFF)
+
+    def snapshot(self) -> dict:
+        # Read seq first and last so a colliding update is obvious to the caller.
+        seq1 = self._read_u32(ADDR_SEQ)
+        status = self._read_u32(ADDR_STATUS)
+        dt = self._read_i32(ADDR_DT_TICKS)
+        t_start = self._read_u32(ADDR_T_START)
+        t_stop = self._read_u32(ADDR_T_STOP)
+        flags = self._read_u32(ADDR_FLAGS)
+        seq2 = self._read_u32(ADDR_SEQ)
+        if seq1 != seq2:
+            seq1 = self._read_u32(ADDR_SEQ)
+            status = self._read_u32(ADDR_STATUS)
+            dt = self._read_i32(ADDR_DT_TICKS)
+            t_start = self._read_u32(ADDR_T_START)
+            t_stop = self._read_u32(ADDR_T_STOP)
+            flags = self._read_u32(ADDR_FLAGS)
+
+        valid = bool(status & STATUS_VALID)
+        if valid and seq1 != self._last_seq:
+            self._last_seq = seq1
+            self._latch_mono = time.monotonic()
+        age_ms = (time.monotonic() - self._latch_mono) * 1000.0 if valid else None
+        dt_ns = ticks_to_ns(dt, self.clock_hz) if valid else None
+        return {
+            "valid": valid,
+            "seq": seq1,
+            "dt_ticks": dt,
+            "dt_ns": dt_ns,
+            "t_start_ticks": t_start,
+            "t_stop_ticks": t_stop,
+            "clock_hz": self.clock_hz,
+            "flags": flags_to_names(flags),
+            "age_ms": None if age_ms is None else round(age_ms, 3),
+            "armed": bool(status & STATUS_ARMED),
+        }
+
+    def health(self) -> dict:
+        ident = self._read_u32(ADDR_ID)
+        status = self._read_u32(ADDR_STATUS)
+        ctrl = self._read_u32(ADDR_CONTROL)
+        timeout = self._read_u32(ADDR_TIMEOUT)
+        return {
+            "ok": ident == ID_VALUE,
+            "id": "TDC1" if ident == ID_VALUE else "0x%08X" % ident,
+            "clock_hz": self.clock_hz,
+            "enable": bool(ctrl & CTRL_ENABLE),
+            "mmcm_locked": bool(status & STATUS_MMCM_LOCKED),
+            "armed": bool(status & STATUS_ARMED),
+            "valid": bool(status & STATUS_VALID),
+            "timeout_ticks": timeout,
+            "base": "0x%08X" % self.base,
+            "sim": False,
+        }
+
+
+def apply_skew(snap: dict, skew_ns: float) -> dict:
+    if snap.get("valid") and snap.get("dt_ns") is not None and skew_ns:
+        snap = dict(snap)
+        snap["dt_ns"] = snap["dt_ns"] - skew_ns
+        snap["skew_ns"] = skew_ns
+    return snap
+
+
+class TdcHttpHandler(BaseHTTPRequestHandler):
+    device: TdcDevice
+    skew_ns: float = 0.0
+
+    def log_message(self, fmt: str, *args) -> None:
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _send_json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        qs = parse_qs(parsed.query)
+
+        if path == "/api/latest":
+            self._send_json(200, apply_skew(self.device.snapshot(), self.skew_ns))
+            return
+        if path == "/api/wait":
+            timeout_ms = 1000
+            if "timeout_ms" in qs:
+                try:
+                    timeout_ms = max(0, int(qs["timeout_ms"][0]))
+                except ValueError:
+                    self._send_json(400, {"error": "timeout_ms must be an integer"})
+                    return
+            first = self.device.snapshot()
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            last = first
+            while time.monotonic() < deadline:
+                last = self.device.snapshot()
+                if last.get("valid") and last.get("seq") != first.get("seq"):
+                    last = dict(last)
+                    last["wait_timed_out"] = False
+                    self._send_json(200, apply_skew(last, self.skew_ns))
+                    return
+                time.sleep(0.001)
+            last = dict(last)
+            last["wait_timed_out"] = True
+            self._send_json(200, apply_skew(last, self.skew_ns))
+            return
+        if path == "/api/health":
+            self._send_json(200, self.device.health())
+            return
+        if path == "/":
+            self._send_json(
+                200,
+                {
+                    "service": "tdc",
+                    "endpoints": ["/api/latest", "/api/wait?timeout_ms=1000", "/api/health"],
+                },
+            )
+            return
+        self._send_json(404, {"error": "not found"})
+
+
+class UdpPollHandler(BaseRequestHandler):
+    def handle(self) -> None:
+        data, sock = self.request
+        snap = apply_skew(self.server.device.snapshot(), self.server.skew_ns)
+        sock.sendto(json.dumps(snap, separators=(",", ":")).encode("utf-8"), self.client_address)
+
+
+def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Red Pitaya TDC poll server")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--udp-port", type=int, default=8081, help="0 disables UDP poll")
+    p.add_argument("--base", default=hex(DEFAULT_BASE), help="FPGA register base (hex or int)")
+    p.add_argument("--skew-ns", type=float, default=0.0, help="Subtract splitter calibration (ns)")
+    p.add_argument("--sim", action="store_true", help="Serve fake measurements (no FPGA)")
+    p.add_argument("--sim-period-ms", type=float, default=10.0)
+    p.add_argument("--sim-dt-ns", type=float, default=1_000_000.0)
+    return p.parse_args(argv)
+
+
+def parse_base(text: str) -> int:
+    return int(text, 0)
+
+
+def main(argv: Optional[list] = None) -> int:
+    args = parse_args(argv)
+    if args.sim:
+        device: TdcDevice = SimTdc(period_s=args.sim_period_ms / 1000.0, dt_ns=args.sim_dt_ns)
+    else:
+        device = FpgaTdc(base=parse_base(args.base))
+
+    TdcHttpHandler.device = device
+    TdcHttpHandler.skew_ns = args.skew_ns
+
+    httpd = ThreadingHTTPServer((args.host, args.port), TdcHttpHandler)
+    udp = None
+    if args.udp_port:
+        udp = ThreadingUDPServer((args.host, args.udp_port), UdpPollHandler)
+        udp.device = device
+        udp.skew_ns = args.skew_ns
+        threading.Thread(target=udp.serve_forever, daemon=True).start()
+
+    mode = "sim" if args.sim else "fpga"
+    print(
+        "TDC poll server (%s) http://%s:%d/api/latest  udp %s"
+        % (mode, args.host, args.port, args.udp_port or "off"),
+        flush=True,
+    )
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopping", flush=True)
+    finally:
+        httpd.server_close()
+        if udp is not None:
+            udp.shutdown()
+        close = getattr(device, "close", None)
+        if close:
+            close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

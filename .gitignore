@@ -1,0 +1,12 @@
+fpga/vivado/
+fpga/output/*.log
+fpga/sim/*.vvp
+fpga/sim/*.vcd
+.Xil/
+*.jou
+*.log
+*.str
+__pycache__/
+*.pyc
+.idea/
+.vscode/
