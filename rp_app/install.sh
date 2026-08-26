@@ -19,7 +19,13 @@ mkdir -p "$DEST/fpga"
 cp -a "$APP_SRC/." "$DEST/"
 cp "$REPO/sw/tdc_server.py" "$REPO/sw/tdc_regs.py" "$REPO/sw/bit_to_bin.py" "$DEST/"
 cp "$BIT" "$DEST/fpga/tdc.bit"
-sed -i 's/\r$//' "$DEST/fpga.sh" "$DEST/restore_fpga.sh" "$DEST/Makefile" "$DEST/nginx.conf" 2>/dev/null || true
+python3 "$DEST/info/make_icon.py"
+cp "$DEST/info/icon.png" "$DEST/icon.png"
+python3 "$DEST/bit_to_bin.py" "$BIT" "$DEST/fpga/tdc.bin"
+test -f "$DEST/info/icon/128.png"
+find "$DEST" -type f ! -name '*.so' ! -name '*.bit' ! -name '*.bin' ! -name '*.png' -exec sed -i 's/\r$//' {} +
+find "$DEST" -type d -exec chmod 755 {} +
+find "$DEST" -type f -exec chmod 644 {} +
 chmod +x "$DEST/fpga.sh" "$DEST/restore_fpga.sh"
 make -C "$DEST" INSTALL_DIR=/opt/redpitaya
 if systemctl restart redpitaya_nginx 2>/dev/null; then

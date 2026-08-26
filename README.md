@@ -85,6 +85,13 @@ and restarts nginx.
 If the tile is missing, `tail -f /var/log/redpitaya_debug.log` while clicking
 it, and confirm `controllerhf.so` exists in that folder.
 
+If the tile has no icon, open `http://rp-XXXX.local/pitaya_tdc/info/icon/128.png`
+directly. OS 2.00 uses that path (not `info/icon.png`). If it 404s, re-run install.
+
+If health stays offline, the FPGA loader log is `/tmp/pitaya_tdc_fpga.log`
+(not only `/tmp/pitaya_tdc.log`). `0x00000001` at the TDC ID register means
+the stock FPGA is still loaded.
+
 To uninstall:
 
 ```bash

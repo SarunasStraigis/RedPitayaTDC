@@ -1,6 +1,6 @@
 {
     "name": "Pitaya TDC",
-    "version": "1.0.0",
+    "version": "1.0-1",
     "revision": "1",
     "description": "START/STOP pulse interval, 4 ns bins. Restores the stock FPGA when you leave the app."
 }

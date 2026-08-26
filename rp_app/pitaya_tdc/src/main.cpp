@@ -1,6 +1,5 @@
 // Lifecycle shim: nginx loads this as controllerhf.so.
-// FPGA overlay is loaded by fpga.sh before rp_app_init.
-// We only start/stop tdc_server.py and restore v0.94 on exit.
+// fpga.sh is also run here in case nginx skipped it or left the stock FPGA.
 
 #include <cerrno>
 #include <csignal>
@@ -86,11 +85,17 @@ static int start_server(void) {
             _exit(127);
         }
         setsid();
+        int logfd = open("/tmp/pitaya_tdc.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+            if (logfd > 2) {
+                close(logfd);
+            }
+        }
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             dup2(devnull, STDIN_FILENO);
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
             if (devnull > 2) {
                 close(devnull);
             }
@@ -104,8 +109,8 @@ static int start_server(void) {
         _exit(127);
     }
     write_pid(pid);
-    /* Give /dev/mem mmap a moment after the overlay load. */
-    usleep(200000);
+    /* fpga.sh has just programmed the PL; python mmap can lose a race. */
+    usleep(800000);
     return 0;
 }
 
@@ -115,6 +120,10 @@ const char *rp_app_desc(void) {
 
 int rp_app_init(void) {
     fprintf(stderr, "pitaya_tdc: rp_app_init\n");
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "/bin/sh %s/fpga.sh", kAppDir);
+    int rc = system(cmd);
+    fprintf(stderr, "pitaya_tdc: fpga.sh rc=%d (see /tmp/pitaya_tdc_fpga.log)\n", rc);
     return start_server();
 }
 
@@ -181,6 +190,12 @@ int ws_set_signals(const char *signals) {
     return 0;
 }
 int ws_get_signals(char **signals) {
+    if (signals) {
+        *signals = strdup("{}");
+    }
+    return 0;
+}
+int ws_get_bin_signals(char **signals) {
     if (signals) {
         *signals = strdup("{}");
     }

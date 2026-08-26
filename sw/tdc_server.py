@@ -336,7 +336,19 @@ def main(argv: Optional[list] = None) -> int:
     if args.sim:
         device: TdcDevice = SimTdc(period_s=args.sim_period_ms / 1000.0, dt_ns=args.sim_dt_ns)
     else:
-        device = FpgaTdc(base=parse_base(args.base))
+        last_err: Optional[BaseException] = None
+        device = None  # type: ignore[assignment]
+        for _ in range(30):
+            try:
+                device = FpgaTdc(base=parse_base(args.base))
+                last_err = None
+                break
+            except Exception as exc:
+                last_err = exc
+                time.sleep(0.2)
+        if last_err is not None:
+            print("FPGA open failed: %s" % last_err, file=sys.stderr, flush=True)
+            return 1
 
     TdcHttpHandler.device = device
     TdcHttpHandler.skew_ns = args.skew_ns

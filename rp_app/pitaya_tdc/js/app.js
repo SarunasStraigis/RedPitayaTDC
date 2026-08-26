@@ -2,7 +2,8 @@
     "use strict";
 
     var APP_ID = "pitaya_tdc";
-    var API = "/pitaya_tdc/api";
+    var API_PATHS = ["/pitaya_tdc/api", "http://" + location.hostname + ":8080/api"];
+    var apiBase = API_PATHS[0];
     var POLL_MS = 100;
     var BAD_FLAGS = { unmatched_stop: 1, timeout: 1, overflow: 1 };
 
@@ -77,11 +78,19 @@
     }
 
     function getJson(path) {
-        return fetch(API + path, { cache: "no-store" }).then(function (res) {
+        return fetch(apiBase + path, { cache: "no-store" }).then(function (res) {
             if (!res.ok) {
                 throw new Error("HTTP " + res.status);
             }
             return res.json();
+        });
+    }
+
+    function getJsonAny(path) {
+        return getJson(path).catch(function () {
+            var next = API_PATHS[0] === apiBase ? API_PATHS[1] : API_PATHS[0];
+            apiBase = next;
+            return getJson(path);
         });
     }
 
@@ -98,16 +107,31 @@
             });
     }
 
-    function stopApp() {
-        try {
-            navigator.sendBeacon("/bazaar?stop=" + encodeURIComponent(APP_ID));
-        } catch (e) {
-            var req = new XMLHttpRequest();
-            req.open("GET", "/bazaar?stop=" + encodeURIComponent(APP_ID), false);
+    function connectWs() {
+        var urls = [
+            "ws://" + location.hostname + ":9002",
+            (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/wss",
+        ];
+        var i = 0;
+        function tryNext() {
+            if (i >= urls.length) {
+                return;
+            }
+            var ws;
             try {
-                req.send();
-            } catch (e2) { /* leaving the page */ }
+                ws = new WebSocket(urls[i++]);
+            } catch (e) {
+                tryNext();
+                return;
+            }
+            ws.onerror = function () {
+                try {
+                    ws.close();
+                } catch (e2) { /* ignore */ }
+                tryNext();
+            };
         }
+        tryNext();
     }
 
     function apply(err, health, latest) {
@@ -210,7 +234,7 @@
     }
 
     function poll() {
-        Promise.all([getJson("/health"), getJson("/latest")])
+        Promise.all([getJsonAny("/health"), getJsonAny("/latest")])
             .then(function (pair) {
                 apply(null, pair[0], pair[1]);
             })
@@ -220,10 +244,8 @@
     }
 
     startApp().then(function () {
+        connectWs();
         poll();
         setInterval(poll, POLL_MS);
     });
-
-    window.addEventListener("pagehide", stopApp);
-    window.addEventListener("beforeunload", stopApp);
 })();

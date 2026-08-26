@@ -1,2 +1,8 @@
 rp_app/**/*.sh text eol=lf
+rp_app/**/*.cpp text eol=lf
+rp_app/**/*.js text eol=lf
+rp_app/**/*.html text eol=lf
+rp_app/**/*.css text eol=lf
+rp_app/**/*.json text eol=lf
+rp_app/**/*.conf text eol=lf
 rp_app/**/Makefile text eol=lf
