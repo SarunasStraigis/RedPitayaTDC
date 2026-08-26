@@ -78,10 +78,8 @@ if {!$moved} {
     error "Could not find TDC address segment to move to 0x40000000"
 }
 
-make_bd_pins_external [get_bd_pins tdc_axi_0/start_i]
-make_bd_pins_external [get_bd_pins tdc_axi_0/stop_i]
-set_property name start_i [get_bd_ports start_i_0]
-set_property name stop_i  [get_bd_ports stop_i_0]
+make_bd_pins_external [get_bd_pins tdc_axi_0/dio_i]
+set_property name dio_i [get_bd_ports dio_i_0]
 
 regenerate_bd_layout
 validate_bd_design

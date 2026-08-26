@@ -53,8 +53,7 @@ module tdc_axi #(
     (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME S_AXI, PROTOCOL AXI4LITE, DATA_WIDTH 32, ADDR_WIDTH 8, READ_WRITE_MODE READ_WRITE, FREQ_HZ 125000000" *)
     input  wire        s_axi_rready,
 
-    input  wire        start_i,
-    input  wire        stop_i
+    input  wire [9:0]  dio_i
 );
 
     localparam ADDR_ID       = 8'h00;
@@ -67,10 +66,14 @@ module tdc_axi #(
     localparam ADDR_FLAGS    = 8'h1C;
     localparam ADDR_TIMEOUT  = 8'h20;
     localparam ADDR_CLOCK_HZ = 8'h24;
+    localparam ADDR_PINS     = 8'h28;
 
     localparam FLAG_TIMEOUT  = 32'd1;
     localparam FLAG_OVERFLOW = 32'd2;
     localparam FLAG_UNMATCH  = 32'd4;
+    localparam [15:0] PINS_CAP = 16'h0001;
+    localparam [3:0]  PIN_START_DEFAULT = 4'd8;  // DIO7_P / E1 17
+    localparam [3:0]  PIN_STOP_DEFAULT  = 4'd9;  // DIO7_N / E1 18
 
     wire clk_125 = s_axi_aclk;
     wire mmcm_locked = 1'b1;
@@ -82,6 +85,8 @@ module tdc_axi #(
     reg        soft_reset_pulse;
     reg [31:0] timeout_axi;
     reg        timeout_written;
+    reg [3:0]  pin_start;
+    reg [3:0]  pin_stop;
 
     reg        aw_ok;
     reg        w_ok;
@@ -107,6 +112,8 @@ module tdc_axi #(
             soft_reset_pulse <= 1'b0;
             timeout_axi      <= DEFAULT_TIMEOUT;
             timeout_written  <= 1'b0;
+            pin_start        <= PIN_START_DEFAULT;
+            pin_stop         <= PIN_STOP_DEFAULT;
         end else begin
             soft_reset_pulse <= 1'b0;
             timeout_written  <= 1'b0;
@@ -137,6 +144,12 @@ module tdc_axi #(
                     if (wstrb_r[2]) timeout_axi[23:16] <= wdata_r[23:16];
                     if (wstrb_r[3]) timeout_axi[31:24] <= wdata_r[31:24];
                     timeout_written <= 1'b1;
+                end else if (awaddr_r == ADDR_PINS) begin
+                    if (wstrb_r[0]) begin
+                        pin_start <= (wdata_r[3:0] > 4'd9) ? PIN_START_DEFAULT : wdata_r[3:0];
+                        pin_stop  <= (wdata_r[7:4] > 4'd9) ? PIN_STOP_DEFAULT  : wdata_r[7:4];
+                        soft_reset_pulse <= 1'b1;
+                    end
                 end
             end
 
@@ -197,6 +210,7 @@ module tdc_axi #(
                     ADDR_FLAGS:    rdata_r <= flags_word;
                     ADDR_TIMEOUT:  rdata_r <= timeout_axi;
                     ADDR_CLOCK_HZ: rdata_r <= CLOCK_HZ;
+                    ADDR_PINS:     rdata_r <= {PINS_CAP, 8'd0, pin_stop, pin_start};
                     default:       rdata_r <= 32'd0;
                 endcase
             end
@@ -215,44 +229,38 @@ module tdc_axi #(
     end
     wire tdc_rst = rst_125_d;
 
-    wire start_q1, start_q2, stop_q1, stop_q2;
+    wire [9:0] dio_q1;
+    wire [9:0] dio_q2;
 
 `ifdef SIM
-    assign start_q1 = start_i;
-    assign start_q2 = start_i;
-    assign stop_q1  = stop_i;
-    assign stop_q2  = stop_i;
+    assign dio_q1 = dio_i;
+    assign dio_q2 = dio_i;
 `else
-    IDDR #(
-        .DDR_CLK_EDGE ("SAME_EDGE_PIPELINED"),
-        .INIT_Q1      (1'b0),
-        .INIT_Q2      (1'b0),
-        .SRTYPE       ("SYNC")
-    ) iddr_start (
-        .Q1 (start_q1),
-        .Q2 (start_q2),
-        .C  (clk_125),
-        .CE (1'b1),
-        .D  (start_i),
-        .R  (tdc_rst),
-        .S  (1'b0)
-    );
-
-    IDDR #(
-        .DDR_CLK_EDGE ("SAME_EDGE_PIPELINED"),
-        .INIT_Q1      (1'b0),
-        .INIT_Q2      (1'b0),
-        .SRTYPE       ("SYNC")
-    ) iddr_stop (
-        .Q1 (stop_q1),
-        .Q2 (stop_q2),
-        .C  (clk_125),
-        .CE (1'b1),
-        .D  (stop_i),
-        .R  (tdc_rst),
-        .S  (1'b0)
-    );
+    genvar gi;
+    generate
+        for (gi = 0; gi < 10; gi = gi + 1) begin : g_iddr
+            IDDR #(
+                .DDR_CLK_EDGE ("SAME_EDGE_PIPELINED"),
+                .INIT_Q1      (1'b0),
+                .INIT_Q2      (1'b0),
+                .SRTYPE       ("SYNC")
+            ) iddr_dio (
+                .Q1 (dio_q1[gi]),
+                .Q2 (dio_q2[gi]),
+                .C  (clk_125),
+                .CE (1'b1),
+                .D  (dio_i[gi]),
+                .R  (tdc_rst),
+                .S  (1'b0)
+            );
+        end
+    endgenerate
 `endif
+
+    wire start_q1 = dio_q1[pin_start];
+    wire start_q2 = dio_q2[pin_start];
+    wire stop_q1  = dio_q1[pin_stop];
+    wire stop_q2  = dio_q2[pin_stop];
 
     reg start_q1_d, start_q2_d, stop_q1_d, stop_q2_d;
     always @(posedge clk_125) begin

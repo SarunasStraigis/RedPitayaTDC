@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 HOST = "127.0.0.1"
@@ -21,6 +22,27 @@ def get(path: str, timeout: float = 2.0) -> dict:
     url = "http://%s:%d%s" % (HOST, HTTP_PORT, path)
     with urllib.request.urlopen(url, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def put(path: str, payload: dict, timeout: float = 2.0) -> tuple:
+    url = "http://%s:%d%s" % (HOST, HTTP_PORT, path)
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="PUT",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = {"error": body}
+        return exc.code, parsed
 
 
 def check_snapshot_fields() -> str | None:
@@ -110,6 +132,26 @@ def main() -> int:
             return 1
         if "latest_flags" not in latest or latest.get("held") is not False:
             print("missing latest_flags/held on sim latest: %r" % latest)
+            return 1
+
+        pins = get("/api/pins")
+        if pins.get("start", {}).get("index") != 8 or pins.get("stop", {}).get("index") != 9:
+            print("default pins should be DIO7 (E1 17/18): %r" % pins)
+            return 1
+        if pins.get("start", {}).get("label") != "DIO7_P (E1 pin 17)":
+            print("pin label missing DIO name and E1 pin: %r" % pins)
+            return 1
+        code, changed = put("/api/pins", {"start": 0, "stop": "DIO1_P"})
+        if code != 200 or changed.get("start", {}).get("index") != 0 or changed.get("stop", {}).get("index") != 2:
+            print("PUT /api/pins failed: %s %r" % (code, changed))
+            return 1
+        code, bad = put("/api/pins", {"start": 3, "stop": 3})
+        if code != 400:
+            print("expected 400 for identical pins: %s %r" % (code, bad))
+            return 1
+        health = get("/api/health")
+        if health.get("start", {}).get("label") != "DIO0_P (E1 pin 3)":
+            print("health start label wrong: %r" % health)
             return 1
 
         seq0 = latest["seq"]

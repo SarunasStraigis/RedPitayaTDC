@@ -17,6 +17,15 @@
         <div class="value" id="dt">—</div>
     </section>
 
+    <section class="pins" id="pinRow">
+        <label>START
+            <select id="startPin"></select>
+        </label>
+        <label>STOP
+            <select id="stopPin"></select>
+        </label>
+    </section>
+
     <dl class="meta">
         <dt>seq</dt><dd id="seq">—</dd>
         <dt>flags</dt><dd id="flags">—</dd>
@@ -27,7 +36,7 @@
     </dl>
 
     <p class="meaning" id="meaning">Waiting for the TDC server.</p>
-    <p class="wiring">E1 pin 17 = START, pin 18 = STOP (3.3 V TTL rising edge). Leave this page to restore Scope.</p>
+    <p class="wiring" id="wiring">E1 DIO, 3.3 V TTL rising edge. Default START is DIO7_P (E1 pin 17), STOP is DIO7_N (E1 pin 18). Leave this page to restore Scope.</p>
 
     <div class="log-hdr">
         <span>New measurements (seq changed)</span>

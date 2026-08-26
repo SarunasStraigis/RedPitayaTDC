@@ -23,6 +23,18 @@ def get_json(url: str, timeout: float = 1.5) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def put_json(url: str, payload: dict, timeout: float = 2.0) -> dict:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="PUT",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def fmt_ns(dt_ns) -> str:
     if dt_ns is None:
         return "—"
@@ -96,6 +108,11 @@ class Monitor(tk.Tk):
         self.rate = tk.StringVar(value="—")
         self.meaning = tk.StringVar(value="Enter Pitaya URL and click Start.")
         self.health = tk.StringVar(value="—")
+        self.wiring = tk.StringVar(
+            value="Default START is DIO7_P (E1 pin 17), STOP is DIO7_N (E1 pin 18)."
+        )
+        self.start_pin = tk.StringVar()
+        self.stop_pin = tk.StringVar()
 
         self.valid_only = tk.BooleanVar(value=True)
         self._running = False
@@ -104,6 +121,9 @@ class Monitor(tk.Tk):
         self._last_good = None
         self._lock = threading.Lock()
         self._pending = None
+        self._pin_by_label = {}
+        self._filling_pins = False
+        self._pins_loaded = False
 
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -125,6 +145,21 @@ class Monitor(tk.Tk):
         ttk.Label(big, text="Interval", font=("Segoe UI", 11)).grid(row=0, column=0, sticky=tk.W)
         ttk.Label(big, textvariable=self.dt, font=("Consolas", 28)).grid(row=1, column=0, sticky=tk.W)
 
+        pins = ttk.Frame(self)
+        pins.pack(fill=tk.X, **pad)
+        ttk.Label(pins, text="START").pack(side=tk.LEFT)
+        self.start_combo = ttk.Combobox(
+            pins, textvariable=self.start_pin, state="readonly", width=28
+        )
+        self.start_combo.pack(side=tk.LEFT, padx=(6, 16))
+        ttk.Label(pins, text="STOP").pack(side=tk.LEFT)
+        self.stop_combo = ttk.Combobox(
+            pins, textvariable=self.stop_pin, state="readonly", width=28
+        )
+        self.stop_combo.pack(side=tk.LEFT, padx=6)
+        self.start_combo.bind("<<ComboboxSelected>>", self._on_pin_change)
+        self.stop_combo.bind("<<ComboboxSelected>>", self._on_pin_change)
+
         grid = ttk.Frame(self)
         grid.pack(fill=tk.X, **pad)
         rows = [
@@ -140,6 +175,9 @@ class Monitor(tk.Tk):
             ttk.Label(grid, textvariable=var, font=("Consolas", 11)).grid(row=i, column=1, sticky=tk.W)
 
         ttk.Label(self, textvariable=self.meaning, wraplength=600, justify=tk.LEFT).pack(
+            anchor=tk.W, **pad
+        )
+        ttk.Label(self, textvariable=self.wiring, wraplength=600, foreground="#666").pack(
             anchor=tk.W, **pad
         )
 
@@ -163,6 +201,7 @@ class Monitor(tk.Tk):
         self._running = True
         self.btn.config(text="Stop")
         self.status.set("Polling…")
+        self._pins_loaded = False
         threading.Thread(target=self._poll_loop, daemon=True).start()
 
     def _poll_loop(self) -> None:
@@ -171,13 +210,19 @@ class Monitor(tk.Tk):
             err = None
             health = None
             latest = None
+            pins = None
             try:
                 health = get_json(base + "/api/health")
                 latest = get_json(base + "/api/latest")
             except Exception as exc:
                 err = str(exc)
+            if err is None and not self._pins_loaded:
+                try:
+                    pins = get_json(base + "/api/pins")
+                except Exception:
+                    pins = None
             with self._lock:
-                self._pending = (time.time(), err, health, latest)
+                self._pending = (time.time(), err, health, latest, pins)
             time.sleep(POLL_MS / 1000.0)
 
     def _drain(self) -> None:
@@ -190,7 +235,59 @@ class Monitor(tk.Tk):
             self._apply(*item)
         self.after(50, self._drain)
 
-    def _apply(self, now: float, err, health, latest) -> None:
+    def _apply_pins(self, payload) -> None:
+        if not payload:
+            return
+        entries = payload.get("pins") or []
+        if not entries:
+            return
+        labels = [p.get("label") or p.get("name") for p in entries]
+        self._pin_by_label = {p.get("label") or p.get("name"): p["index"] for p in entries}
+        self._filling_pins = True
+        self.start_combo["values"] = labels
+        self.stop_combo["values"] = labels
+        if payload.get("start"):
+            self.start_pin.set(payload["start"].get("label") or "")
+        if payload.get("stop"):
+            self.stop_pin.set(payload["stop"].get("label") or "")
+        selectable = bool(payload.get("selectable"))
+        state = "readonly" if selectable else "disabled"
+        self.start_combo.config(state=state)
+        self.stop_combo.config(state=state)
+        self._filling_pins = False
+        self._pins_loaded = True
+        s = (payload.get("start") or {}).get("label")
+        t = (payload.get("stop") or {}).get("label")
+        if not selectable:
+            self.wiring.set(
+                payload.get("error")
+                or "Pin mux not in this bitstream. Rebuild tdc.bit. Default is DIO7_P (E1 pin 17) / DIO7_N (E1 pin 18)."
+            )
+        elif s and t:
+            self.wiring.set("START = %s, STOP = %s (3.3 V TTL rising edge)." % (s, t))
+
+    def _on_pin_change(self, _event=None) -> None:
+        if self._filling_pins or not self._running:
+            return
+        start = self._pin_by_label.get(self.start_pin.get())
+        stop = self._pin_by_label.get(self.stop_pin.get())
+        if start is None or stop is None:
+            return
+        if start == stop:
+            self.meaning.set("START and STOP must be different pins.")
+            return
+        base = self.url.get().rstrip("/")
+
+        def worker():
+            try:
+                payload = put_json(base + "/api/pins", {"start": start, "stop": stop})
+                self.after(0, lambda: self._apply_pins(payload))
+            except Exception as exc:
+                self.after(0, lambda: self.meaning.set(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply(self, now: float, err, health, latest, pins=None) -> None:
         if err:
             self.status.set("Error: " + err)
             self.health.set("offline")
@@ -203,6 +300,8 @@ class Monitor(tk.Tk):
         locked = (health or {}).get("mmcm_locked")
         self.health.set("id=%s  enable=%s  mmcm=%s" % (hid, en, locked))
         self.status.set("Connected" if ok else "FPGA ID mismatch — is tdc.bin loaded?")
+        if pins:
+            self._apply_pins(pins)
 
         latest = latest or {}
         valid = bool(latest.get("valid"))

@@ -24,21 +24,31 @@ from tdc_regs import (
     ADDR_DT_TICKS,
     ADDR_FLAGS,
     ADDR_ID,
+    ADDR_PINS,
     ADDR_SEQ,
     ADDR_STATUS,
     ADDR_T_START,
     ADDR_T_STOP,
     ADDR_TIMEOUT,
     CTRL_ENABLE,
+    CTRL_SOFT_RESET,
     DEFAULT_BASE,
     DEFAULT_CLOCK_HZ,
+    DEFAULT_START_SEL,
+    DEFAULT_STOP_SEL,
     ID_VALUE,
     MAP_SIZE,
     STATUS_ARMED,
     STATUS_MMCM_LOCKED,
     STATUS_VALID,
+    decode_pins_word,
+    encode_pins_word,
     flags_to_names,
     is_good_pair,
+    parse_pin_sel,
+    pin_info,
+    pins_list,
+    pins_selectable,
 )
 
 
@@ -110,6 +120,21 @@ class TdcDevice:
     def health(self) -> dict:
         raise NotImplementedError
 
+    def pins(self) -> dict:
+        raise NotImplementedError
+
+    def set_pins(self, start, stop) -> dict:
+        raise NotImplementedError
+
+
+def pins_payload(start: int, stop: int, selectable: bool = True) -> dict:
+    return {
+        "selectable": selectable,
+        "start": pin_info(start),
+        "stop": pin_info(stop),
+        "pins": pins_list(),
+    }
+
 
 class SimTdc(TdcDevice):
     """Software stand-in so the REST API can be exercised without a bitstream."""
@@ -124,6 +149,8 @@ class SimTdc(TdcDevice):
         self._flags = 0
         self._enable = True
         self._latch_mono = time.monotonic()
+        self._start_sel = DEFAULT_START_SEL
+        self._stop_sel = DEFAULT_STOP_SEL
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, args=(period_s, dt_ns), daemon=True)
         self._thread.start()
@@ -172,7 +199,24 @@ class SimTdc(TdcDevice):
                 "armed": False,
                 "valid": self._valid,
                 "sim": True,
+                "start": pin_info(self._start_sel),
+                "stop": pin_info(self._stop_sel),
+                "pins_selectable": True,
             }
+
+    def pins(self) -> dict:
+        with self._lock:
+            return pins_payload(self._start_sel, self._stop_sel, True)
+
+    def set_pins(self, start, stop) -> dict:
+        s = parse_pin_sel(start)
+        t = parse_pin_sel(stop)
+        if s == t:
+            raise ValueError("START and STOP must be different pins")
+        with self._lock:
+            self._start_sel = s
+            self._stop_sel = t
+            return pins_payload(self._start_sel, self._stop_sel, True)
 
 class FpgaTdc(TdcDevice):
     def __init__(self, base: int = DEFAULT_BASE):
@@ -319,7 +363,10 @@ class FpgaTdc(TdcDevice):
         status = self._read_u32(ADDR_STATUS)
         ctrl = self._read_u32(ADDR_CONTROL)
         timeout = self._read_u32(ADDR_TIMEOUT)
-        return {
+        pins_word = self._read_u32(ADDR_PINS)
+        selectable = pins_selectable(pins_word)
+        start, stop = decode_pins_word(pins_word) if selectable else (DEFAULT_START_SEL, DEFAULT_STOP_SEL)
+        out = {
             "ok": ident == ID_VALUE,
             "id": "TDC1" if ident == ID_VALUE else "0x%08X" % ident,
             "clock_hz": self.clock_hz,
@@ -330,7 +377,39 @@ class FpgaTdc(TdcDevice):
             "timeout_ticks": timeout,
             "base": "0x%08X" % self.base,
             "sim": False,
+            "pins_selectable": selectable,
         }
+        if selectable:
+            out["start"] = pin_info(start)
+            out["stop"] = pin_info(stop)
+        return out
+
+    def pins(self) -> dict:
+        word = self._read_u32(ADDR_PINS)
+        selectable = pins_selectable(word)
+        if not selectable:
+            return {
+                "selectable": False,
+                "error": "this bitstream has no pin mux (rebuild tdc.bit)",
+                "pins": pins_list(),
+            }
+        start, stop = decode_pins_word(word)
+        return pins_payload(start, stop, True)
+
+    def set_pins(self, start, stop) -> dict:
+        word = self._read_u32(ADDR_PINS)
+        if not pins_selectable(word):
+            raise ValueError("this bitstream has no pin mux (rebuild tdc.bit)")
+        s = parse_pin_sel(start)
+        t = parse_pin_sel(stop)
+        if s == t:
+            raise ValueError("START and STOP must be different pins")
+        self._write_u32(ADDR_PINS, encode_pins_word(s, t))
+        enable = self._read_u32(ADDR_CONTROL) & CTRL_ENABLE
+        self._write_u32(ADDR_CONTROL, enable | CTRL_SOFT_RESET)
+        with self._lock:
+            self._last_good = None
+        return self.pins()
 
 
 def apply_skew(snap: dict, skew_ns: float) -> dict:
@@ -361,7 +440,7 @@ class TdcHttpHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
@@ -399,16 +478,47 @@ class TdcHttpHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json(200, self.device.health())
             return
+        if path == "/api/pins":
+            self._send_json(200, self.device.pins())
+            return
         if path == "/":
             self._send_json(
                 200,
                 {
                     "service": "tdc",
-                    "endpoints": ["/api/latest", "/api/wait?timeout_ms=1000", "/api/health"],
+                    "endpoints": [
+                        "/api/latest",
+                        "/api/wait?timeout_ms=1000",
+                        "/api/health",
+                        "/api/pins",
+                    ],
                 },
             )
             return
         self._send_json(404, {"error": "not found"})
+
+    def do_PUT(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path != "/api/pins":
+            self._send_json(404, {"error": "not found"})
+            return
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except ValueError:
+            self._send_json(400, {"error": "invalid JSON"})
+            return
+        if "start" not in body or "stop" not in body:
+            self._send_json(400, {"error": "start and stop are required"})
+            return
+        try:
+            payload = self.device.set_pins(body["start"], body["stop"])
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+        self._send_json(200, payload)
 
 
 class UdpPollHandler(BaseRequestHandler):

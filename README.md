@@ -17,11 +17,17 @@ the stock FPGA so Scope / SCPI work again.
 
 Use the **E1** 3.3 V DIO connector, not the SMA analog inputs.
 
+Default wiring (same as the original overlay):
+
 | Signal | E1 pin | FPGA pin | Name   |
 |--------|--------|----------|--------|
 | GND    | 14 / 25 (or any E1 GND) | — | — |
-| START  | 17     | M14      | DIO0_P |
-| STOP   | 18     | M15      | DIO0_N |
+| START  | 17     | M14      | DIO7_P |
+| STOP   | 18     | M15      | DIO7_N |
+
+The web app (and `/api/pins`) can switch START/STOP among **DIO0–DIO3** (E1 pins 3–10) and **DIO7** (E1 17/18). E1 pins 19–24 are NC on STEMlab 125-14. Dropdowns show both the DIO name and the E1 pin, e.g. `DIO7_P (E1 pin 17)`.
+
+A bitstream rebuild is required after this pin mux was added. Old overlays ignore `/api/pins`.
 
 - LVCMOS 3.3 V, rising-edge.
 - Pulse width at least ~8–10 ns so a 250 MHz flip-flop does not miss the edge.
@@ -199,6 +205,8 @@ python sw/tdc_server.py --sim
 curl http://rp-XXXX.local:8080/api/latest
 curl "http://rp-XXXX.local:8080/api/wait?timeout_ms=1000"
 curl http://rp-XXXX.local:8080/api/health
+curl http://rp-XXXX.local:8080/api/pins
+curl -X PUT http://rp-XXXX.local:8080/api/pins -H "Content-Type: application/json" -d "{\"start\":8,\"stop\":9}"
 ```
 
 `GET /api/latest` always returns immediately:
@@ -273,6 +281,7 @@ After calibration, a true 0 ns pair should read near 0.
 | 1C  | FLAGS     | R      | bit0 timeout, bit1 overflow, bit2 unmatched|
 | 20  | TIMEOUT   | RW     | timeout in ticks (default 500e6 = 2 s)     |
 | 24  | CLOCK_HZ  | R      | `250000000`                                |
+| 28  | PINS      | RW     | [3:0] START sel, [7:4] STOP sel, [31:16]=1 |
 
 Timeout `0` disables the watchdog. Overflow is latched if the 32-bit wait
 counter wraps (~17.2 s) while still armed.
@@ -314,7 +323,7 @@ python sw/test_api.py
 ## Layout
 
 - `fpga/rtl/tdc_timestamp.v` — 250 MHz dual-channel timestamp + pairing
-- `fpga/rtl/tdc_axi.v` — AXI-Lite last-result registers, IDDR, 125 MHz TDC
+- `fpga/rtl/tdc_axi.v` — AXI-Lite last-result registers, IDDR-per-pin mux, 125 MHz TDC
 - `fpga/constr/stemlab_125_14.xdc` — E1 pinout
 - `fpga/tcl/build.tcl` / `fpga/tcl/build.ps1` — Vivado batch build
 - `rp_app/pitaya_tdc/` — STEMlab web app (tile, FPGA load/restore, in-browser monitor)

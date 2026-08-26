@@ -55,6 +55,33 @@ header h1 {
     color: var(--accent);
 }
 
+.pins {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 20px;
+    margin: 0 0 14px;
+    align-items: center;
+}
+
+.pins label {
+    color: var(--muted);
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pins select {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 0.85rem;
+    min-width: 13.5rem;
+}
+
 .meta {
     display: grid;
     grid-template-columns: 7.5rem 1fr;

@@ -124,6 +124,96 @@
         });
     }
 
+    var fillingPins = false;
+    var pinsLoaded = false;
+    var pinsLoading = false;
+
+    function fillPinSelect(sel, pins, current) {
+        sel.innerHTML = "";
+        for (var i = 0; i < pins.length; i++) {
+            var p = pins[i];
+            var opt = document.createElement("option");
+            opt.value = String(p.index);
+            opt.textContent = p.label || (p.name + " (E1 pin " + p.e1 + ")");
+            if (p.index === current) {
+                opt.selected = true;
+            }
+            sel.appendChild(opt);
+        }
+    }
+
+    function applyPinUi(payload) {
+        var row = $("pinRow");
+        var startSel = $("startPin");
+        var stopSel = $("stopPin");
+        row.style.display = "";
+        var list = (payload && payload.pins) || [];
+        if (!list.length) {
+            return;
+        }
+        fillingPins = true;
+        fillPinSelect(startSel, list, payload.start && payload.start.index);
+        fillPinSelect(stopSel, list, payload.stop && payload.stop.index);
+        fillingPins = false;
+        var selectable = !!(payload && payload.selectable);
+        startSel.disabled = !selectable;
+        stopSel.disabled = !selectable;
+        pinsLoaded = selectable || list.length > 0;
+        var s = payload.start && payload.start.label;
+        var t = payload.stop && payload.stop.label;
+        if (!selectable) {
+            $("wiring").textContent =
+                (payload && payload.error) ||
+                "Pin mux not in this bitstream. Rebuild tdc.bit and reinstall. Default is still DIO7_P (E1 pin 17) / DIO7_N (E1 pin 18).";
+        } else if (s && t) {
+            $("wiring").textContent =
+                "START = " + s + ", STOP = " + t +
+                " (3.3 V TTL rising edge). Leave this page to restore Scope.";
+        }
+    }
+
+    function putPins() {
+        var start = Number($("startPin").value);
+        var stop = Number($("stopPin").value);
+        if (start === stop) {
+            $("meaning").textContent = "START and STOP must be different pins.";
+            return;
+        }
+        fetch(apiBase + "/pins", {
+            method: "PUT",
+            cache: "no-store",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ start: start, stop: stop }),
+        })
+            .then(function (res) {
+                return res.json().then(function (body) {
+                    if (!res.ok) {
+                        throw new Error(body.error || ("HTTP " + res.status));
+                    }
+                    return body;
+                });
+            })
+            .then(applyPinUi)
+            .catch(function (err) {
+                $("meaning").textContent = String(err.message || err);
+            });
+    }
+
+    function loadPins() {
+        if (pinsLoading) {
+            return;
+        }
+        pinsLoading = true;
+        getJsonAny("/pins")
+            .then(function (payload) {
+                pinsLoading = false;
+                applyPinUi(payload);
+            })
+            .catch(function () {
+                pinsLoading = false;
+            });
+    }
+
     function startApp() {
         return fetch("/bazaar?start=" + encodeURIComponent(APP_ID), { cache: "no-store" })
             .then(function (res) {
@@ -178,6 +268,9 @@
             "  enable=" + (health ? health.enable : "?") +
             "  mmcm=" + (health ? health.mmcm_locked : "?");
         $("status").textContent = ok ? "Connected" : "FPGA ID mismatch — is tdc.bin loaded?";
+        if (ok && !pinsLoaded) {
+            loadPins();
+        }
 
         latest = latest || {};
         var valid = !!latest.valid;
@@ -273,6 +366,17 @@
 
     startApp().then(function () {
         connectWs();
+        $("startPin").addEventListener("change", function () {
+            if (!fillingPins) {
+                putPins();
+            }
+        });
+        $("stopPin").addEventListener("change", function () {
+            if (!fillingPins) {
+                putPins();
+            }
+        });
+        loadPins();
         poll();
         setInterval(poll, POLL_MS);
     });
