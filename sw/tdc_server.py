@@ -38,6 +38,7 @@ from tdc_regs import (
     STATUS_MMCM_LOCKED,
     STATUS_VALID,
     flags_to_names,
+    is_good_pair,
 )
 
 
@@ -55,6 +56,51 @@ def ticks_to_ns(dt_ticks: int, clock_hz: int) -> float:
     if clock_hz <= 0:
         return 0.0
     return dt_ticks * 1e9 / clock_hz
+
+
+def pack_snapshot(
+    *,
+    valid: bool,
+    seq: int,
+    dt_ticks: int,
+    t_start: int,
+    flags,
+    age_ms,
+    armed: bool,
+    clock_hz: int,
+    t_stop: Optional[int] = None,
+    fpga_seq: Optional[int] = None,
+    latest_flags=None,
+    held: bool = False,
+) -> dict:
+    signed = dt_ticks if dt_ticks < 0x80000000 else dt_ticks - 0x100000000
+    if isinstance(flags, int):
+        flag_names = flags_to_names(flags)
+    else:
+        flag_names = list(flags or [])
+    if latest_flags is None:
+        latest_names = flag_names
+    elif isinstance(latest_flags, int):
+        latest_names = flags_to_names(latest_flags)
+    else:
+        latest_names = list(latest_flags)
+    out = {
+        "valid": bool(valid),
+        "seq": int(seq),
+        "dt_ticks": signed,
+        "dt_ns": ticks_to_ns(signed, clock_hz) if valid else None,
+        "t_start_ticks": int(t_start) & 0xFFFFFFFF,
+        "clock_hz": clock_hz,
+        "flags": flag_names,
+        "age_ms": None if age_ms is None else round(age_ms, 3),
+        "armed": bool(armed),
+        "fpga_seq": int(seq if fpga_seq is None else fpga_seq),
+        "latest_flags": latest_names,
+        "held": bool(held),
+    }
+    if t_stop is not None:
+        out["t_stop_ticks"] = int(t_stop) & 0xFFFFFFFF
+    return out
 
 
 class TdcDevice:
@@ -101,7 +147,7 @@ class SimTdc(TdcDevice):
     def snapshot(self) -> dict:
         with self._lock:
             age_ms = (time.monotonic() - self._latch_mono) * 1000.0 if self._valid else None
-            return self._pack(
+            return pack_snapshot(
                 valid=self._valid,
                 seq=self._seq,
                 dt_ticks=self._dt_ticks,
@@ -109,6 +155,10 @@ class SimTdc(TdcDevice):
                 flags=self._flags,
                 age_ms=age_ms,
                 armed=False,
+                clock_hz=self.clock_hz,
+                fpga_seq=self._seq,
+                latest_flags=self._flags,
+                held=False,
             )
 
     def health(self) -> dict:
@@ -123,21 +173,6 @@ class SimTdc(TdcDevice):
                 "valid": self._valid,
                 "sim": True,
             }
-
-    def _pack(self, valid, seq, dt_ticks, t_start, flags, age_ms, armed) -> dict:
-        signed = dt_ticks if dt_ticks < 0x80000000 else dt_ticks - 0x100000000
-        return {
-            "valid": bool(valid),
-            "seq": int(seq),
-            "dt_ticks": signed,
-            "dt_ns": ticks_to_ns(signed, self.clock_hz) if valid else None,
-            "t_start_ticks": int(t_start) & 0xFFFFFFFF,
-            "clock_hz": self.clock_hz,
-            "flags": flags_to_names(flags),
-            "age_ms": None if age_ms is None else round(age_ms, 3),
-            "armed": bool(armed),
-        }
-
 
 class FpgaTdc(TdcDevice):
     def __init__(self, base: int = DEFAULT_BASE):
@@ -158,6 +193,9 @@ class FpgaTdc(TdcDevice):
         self.clock_hz = self._read_u32(ADDR_CLOCK_HZ) or DEFAULT_CLOCK_HZ
         self._last_seq: Optional[int] = None
         self._latch_mono = time.monotonic()
+        self._lock = threading.Lock()
+        self._last_good: Optional[dict] = None
+        self._good_mono = time.monotonic()
 
     def close(self) -> None:
         try:
@@ -174,7 +212,7 @@ class FpgaTdc(TdcDevice):
     def _write_u32(self, off: int, value: int) -> None:
         struct.pack_into("<I", self._mem, off, value & 0xFFFFFFFF)
 
-    def snapshot(self) -> dict:
+    def _read_raw(self) -> dict:
         # Read seq first and last so a colliding update is obvious to the caller.
         seq1 = self._read_u32(ADDR_SEQ)
         status = self._read_u32(ADDR_STATUS)
@@ -190,25 +228,91 @@ class FpgaTdc(TdcDevice):
             t_start = self._read_u32(ADDR_T_START)
             t_stop = self._read_u32(ADDR_T_STOP)
             flags = self._read_u32(ADDR_FLAGS)
-
-        valid = bool(status & STATUS_VALID)
-        if valid and seq1 != self._last_seq:
-            self._last_seq = seq1
-            self._latch_mono = time.monotonic()
-        age_ms = (time.monotonic() - self._latch_mono) * 1000.0 if valid else None
-        dt_ns = ticks_to_ns(dt, self.clock_hz) if valid else None
         return {
-            "valid": valid,
             "seq": seq1,
-            "dt_ticks": dt,
-            "dt_ns": dt_ns,
-            "t_start_ticks": t_start,
-            "t_stop_ticks": t_stop,
-            "clock_hz": self.clock_hz,
-            "flags": flags_to_names(flags),
-            "age_ms": None if age_ms is None else round(age_ms, 3),
-            "armed": bool(status & STATUS_ARMED),
+            "status": status,
+            "dt": dt,
+            "t_start": t_start,
+            "t_stop": t_stop,
+            "flags": flags,
         }
+
+    def snapshot(self) -> dict:
+        raw = self._read_raw()
+        valid = bool(raw["status"] & STATUS_VALID)
+        flags = raw["flags"]
+        if not is_good_pair(valid, flags):
+            for _ in range(7):
+                raw = self._read_raw()
+                valid = bool(raw["status"] & STATUS_VALID)
+                flags = raw["flags"]
+                if is_good_pair(valid, flags):
+                    break
+
+        seq = raw["seq"]
+        armed = bool(raw["status"] & STATUS_ARMED)
+        now = time.monotonic()
+        with self._lock:
+            if valid and seq != self._last_seq:
+                self._last_seq = seq
+                self._latch_mono = now
+            age_ms = (now - self._latch_mono) * 1000.0 if valid else None
+
+            if is_good_pair(valid, flags):
+                self._last_good = {
+                    "seq": seq,
+                    "dt_ticks": raw["dt"],
+                    "t_start": raw["t_start"],
+                    "t_stop": raw["t_stop"],
+                    "flags": flags,
+                }
+                self._good_mono = now
+                return pack_snapshot(
+                    valid=True,
+                    seq=seq,
+                    dt_ticks=raw["dt"],
+                    t_start=raw["t_start"],
+                    t_stop=raw["t_stop"],
+                    flags=flags,
+                    age_ms=age_ms,
+                    armed=armed,
+                    clock_hz=self.clock_hz,
+                    fpga_seq=seq,
+                    latest_flags=flags,
+                    held=False,
+                )
+
+            if self._last_good is not None:
+                g = self._last_good
+                return pack_snapshot(
+                    valid=True,
+                    seq=g["seq"],
+                    dt_ticks=g["dt_ticks"],
+                    t_start=g["t_start"],
+                    t_stop=g["t_stop"],
+                    flags=g["flags"],
+                    age_ms=(now - self._good_mono) * 1000.0,
+                    armed=armed,
+                    clock_hz=self.clock_hz,
+                    fpga_seq=seq,
+                    latest_flags=flags,
+                    held=True,
+                )
+
+            return pack_snapshot(
+                valid=False,
+                seq=0,
+                dt_ticks=0,
+                t_start=raw["t_start"],
+                t_stop=raw["t_stop"],
+                flags=flags,
+                age_ms=None,
+                armed=armed,
+                clock_hz=self.clock_hz,
+                fpga_seq=seq,
+                latest_flags=flags,
+                held=False,
+            )
 
     def health(self) -> dict:
         ident = self._read_u32(ADDR_ID)

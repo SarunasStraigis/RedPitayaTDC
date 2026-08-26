@@ -41,10 +41,26 @@ def fmt_ns(dt_ns) -> str:
 BAD_FLAGS = ("unmatched_stop", "timeout", "overflow")
 
 
-def is_good_pair(latest: dict) -> bool:
+def latest_flags(latest: dict) -> list:
+    if latest.get("latest_flags") is not None:
+        return list(latest.get("latest_flags") or [])
+    return list(latest.get("flags") or [])
+
+
+def fpga_seq_of(latest: dict):
+    if latest.get("fpga_seq") is not None:
+        return int(latest["fpga_seq"])
+    if latest.get("seq") is not None:
+        return int(latest["seq"])
+    return None
+
+
+def is_raw_good(latest: dict) -> bool:
+    if not latest or latest.get("held"):
+        return False
     if not latest.get("valid"):
         return False
-    flags = latest.get("flags") or []
+    flags = latest_flags(latest)
     return not any(f in flags for f in BAD_FLAGS)
 
 
@@ -191,18 +207,21 @@ class Monitor(tk.Tk):
         latest = latest or {}
         valid = bool(latest.get("valid"))
         seq = latest.get("seq")
-        flags = latest.get("flags") or []
+        flags = latest_flags(latest)
         armed = bool(latest.get("armed"))
-        good = is_good_pair(latest)
-        if good:
+        raw_good = is_raw_good(latest)
+        fpga_seq = fpga_seq_of(latest)
+        if raw_good or (latest.get("held") and latest.get("valid")):
             self._last_good = dict(latest)
             self._last_good["_seen"] = now
 
         show = latest
-        if self.valid_only.get() and not good:
+        if self.valid_only.get() and not raw_good and not latest.get("held"):
             show = self._last_good
         shown_valid = bool(show and show.get("valid"))
-        shown_flags = (show.get("flags") if show else None) or []
+        shown_flags = latest_flags(show) if show else []
+        if show is latest:
+            shown_flags = flags
         shown_seq = show.get("seq") if show else None
         dt_ns = show.get("dt_ns") if show and shown_valid else None
 
@@ -214,36 +233,32 @@ class Monitor(tk.Tk):
         if show is self._last_good and show is not latest and isinstance(show.get("_seen"), float):
             age = (now - show["_seen"]) * 1000.0
         self.age.set("%.1f ms" % age if isinstance(age, (int, float)) else "—")
-        if self.valid_only.get() and not good:
-            if self._last_good is None:
+        if latest.get("held") or (self.valid_only.get() and not raw_good):
+            if self._last_good is None and not latest.get("held"):
                 self.meaning.set("Waiting for a valid START→STOP pair.")
             else:
                 self.meaning.set("Holding last valid pair. Latest FPGA result was not a delay.")
         else:
             self.meaning.set(meaning(flags, valid, armed))
 
-        if seq is not None:
-            if (not self.valid_only.get()) or good:
-                self._seq_window.append((now, int(seq)))
+        if fpga_seq is not None:
+            self._seq_window.append((now, fpga_seq))
             cutoff = now - 1.0
             self._seq_window = [(t, s) for t, s in self._seq_window if t >= cutoff]
             if len(self._seq_window) >= 2:
                 dt = self._seq_window[-1][0] - self._seq_window[0][0]
-                if self.valid_only.get():
-                    hz = (len(self._seq_window) - 1) / dt if dt > 0 else 0.0
-                else:
-                    ds = self._seq_window[-1][1] - self._seq_window[0][1]
-                    hz = ds / dt if dt > 0 else 0.0
+                ds = self._seq_window[-1][1] - self._seq_window[0][1]
+                hz = ds / dt if dt > 0 else 0.0
                 self.rate.set("%.0f events/s" % hz if hz >= 1 else "%.2f events/s" % hz)
             else:
                 self.rate.set("—")
 
-            if self._last_seq is not None and seq != self._last_seq:
-                if (not self.valid_only.get()) or good:
+            if self._last_seq is not None and fpga_seq != self._last_seq:
+                if (not self.valid_only.get()) or raw_good:
                     line = "%s  seq=%s  %s  flags=%s  armed=%s\n" % (
                         time.strftime("%H:%M:%S"),
-                        seq,
-                        fmt_ns(latest.get("dt_ns") if valid else None),
+                        seq if seq is not None else fpga_seq,
+                        fmt_ns(dt_ns if shown_valid else None),
                         ",".join(flags) if flags else "-",
                         armed,
                     )
@@ -251,7 +266,7 @@ class Monitor(tk.Tk):
                     self.log.insert(tk.END, line)
                     self.log.see(tk.END)
                     self.log.config(state=tk.DISABLED)
-            self._last_seq = seq
+            self._last_seq = fpga_seq
 
     def _on_close(self) -> None:
         self._running = False

@@ -34,6 +34,13 @@ FLAG_NAMES = (
     (FLAG_UNMATCHED_STOP, "unmatched_stop"),
 )
 
+BAD_FLAG_MASK = FLAG_TIMEOUT | FLAG_OVERFLOW | FLAG_UNMATCHED_STOP
+
 
 def flags_to_names(flags: int) -> list:
     return [name for bit, name in FLAG_NAMES if flags & bit]
+
+
+def is_good_pair(valid: bool, flags: int) -> bool:
+    """True for a START→STOP delay (not unmatched STOP / timeout / overflow)."""
+    return bool(valid) and (int(flags) & BAD_FLAG_MASK) == 0

@@ -35,17 +35,47 @@
         return v.toFixed(1) + " ns";
     }
 
-    function isGoodPair(latest) {
-        if (!latest || !latest.valid) {
-            return false;
+    function latestFlags(latest) {
+        if (!latest) {
+            return [];
         }
-        var flags = latest.flags || [];
+        if (Object.prototype.hasOwnProperty.call(latest, "latest_flags")) {
+            return latest.latest_flags || [];
+        }
+        return latest.flags || [];
+    }
+
+    function fpgaSeqOf(latest) {
+        if (!latest) {
+            return null;
+        }
+        if (latest.fpga_seq !== undefined && latest.fpga_seq !== null) {
+            return Number(latest.fpga_seq);
+        }
+        if (latest.seq !== undefined && latest.seq !== null) {
+            return Number(latest.seq);
+        }
+        return null;
+    }
+
+    function hasBadFlag(flags) {
+        flags = flags || [];
         for (var i = 0; i < flags.length; i++) {
             if (BAD_FLAGS[flags[i]]) {
-                return false;
+                return true;
             }
         }
-        return true;
+        return false;
+    }
+
+    function isRawGood(latest) {
+        if (!latest || latest.held) {
+            return false;
+        }
+        if (!latest.valid) {
+            return false;
+        }
+        return !hasBadFlag(latestFlags(latest));
     }
 
     function meaning(flags, valid, armed) {
@@ -152,23 +182,27 @@
         latest = latest || {};
         var valid = !!latest.valid;
         var seq = latest.seq;
-        var flags = latest.flags || [];
+        var flags = latestFlags(latest);
         var armed = !!latest.armed;
-        var good = isGoodPair(latest);
+        var rawGood = isRawGood(latest);
         var now = Date.now() / 1000;
         var validOnly = $("validOnly").checked;
+        var fpgaSeq = fpgaSeqOf(latest);
 
-        if (good) {
+        if (rawGood || (latest.held && latest.valid)) {
             lastGood = latest;
             lastGoodAt = now;
         }
 
         var show = latest;
-        if (validOnly && !good) {
+        if (validOnly && !rawGood && !latest.held) {
             show = lastGood;
         }
         var shownValid = !!(show && show.valid);
-        var shownFlags = (show && show.flags) || [];
+        var shownFlags = show ? latestFlags(show) : [];
+        if (show === latest) {
+            shownFlags = flags;
+        }
         var shownSeq = show ? show.seq : null;
         var dtNs = shownValid && show ? show.dt_ns : null;
 
@@ -183,41 +217,35 @@
         }
         $("age").textContent = typeof age === "number" ? age.toFixed(1) + " ms" : "—";
 
-        if (validOnly && !good) {
-            $("meaning").textContent = lastGood
+        if (latest.held || (validOnly && !rawGood)) {
+            $("meaning").textContent = (lastGood || latest.held)
                 ? "Holding last valid pair. Latest FPGA result was not a delay."
                 : "Waiting for a valid START→STOP pair.";
         } else {
             $("meaning").textContent = meaning(flags, valid, armed);
         }
 
-        if (seq !== null && seq !== undefined) {
-            if (!validOnly || good) {
-                seqWindow.push([now, Number(seq)]);
-            }
+        if (fpgaSeq !== null) {
+            seqWindow.push([now, fpgaSeq]);
             var cutoff = now - 1;
             seqWindow = seqWindow.filter(function (p) { return p[0] >= cutoff; });
             if (seqWindow.length >= 2) {
                 var dt = seqWindow[seqWindow.length - 1][0] - seqWindow[0][0];
                 var hz = 0;
                 if (dt > 0) {
-                    if (validOnly) {
-                        hz = (seqWindow.length - 1) / dt;
-                    } else {
-                        hz = (seqWindow[seqWindow.length - 1][1] - seqWindow[0][1]) / dt;
-                    }
+                    hz = (seqWindow[seqWindow.length - 1][1] - seqWindow[0][1]) / dt;
                 }
                 $("rate").textContent = hz >= 1 ? hz.toFixed(0) + " events/s" : hz.toFixed(2) + " events/s";
             } else {
                 $("rate").textContent = "—";
             }
 
-            if (lastSeq !== null && seq !== lastSeq) {
-                if (!validOnly || good) {
+            if (lastSeq !== null && fpgaSeq !== lastSeq) {
+                if (!validOnly || rawGood) {
                     var line =
                         stamp() +
-                        "  seq=" + seq +
-                        "  " + fmtNs(valid ? latest.dt_ns : null) +
+                        "  seq=" + (seq !== null && seq !== undefined ? seq : fpgaSeq) +
+                        "  " + fmtNs(shownValid ? dtNs : null) +
                         "  flags=" + (flags.length ? flags.join(",") : "-") +
                         "  armed=" + armed +
                         "\n";
@@ -229,7 +257,7 @@
                     log.scrollTop = log.scrollHeight;
                 }
             }
-            lastSeq = seq;
+            lastSeq = fpgaSeq;
         }
     }
 
