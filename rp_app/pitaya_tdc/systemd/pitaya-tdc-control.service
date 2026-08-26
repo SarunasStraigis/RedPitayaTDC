@@ -1,0 +1,15 @@
+[Unit]
+Description=Pitaya TDC control helper
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/redpitaya/www/apps/pitaya_tdc
+ExecStart=/usr/bin/python3 /opt/redpitaya/www/apps/pitaya_tdc/tdc_control.py
+Restart=always
+RestartSec=1
+TimeoutStopSec=5
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

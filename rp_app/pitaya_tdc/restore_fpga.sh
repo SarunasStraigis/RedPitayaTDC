@@ -1,10 +1,25 @@
 #!/bin/sh
-# Put the stock v0.94 overlay back so Scope / SCPI work after this app exits.
+# Put the stock v0.94 overlay back so Scope / SCPI work after Stop.
+# Shares the FPGA lock with fpga.sh so Start after Stop does not collide.
+# If Start already ran again (.want), skip — do not overwrite TDC.
 
-if [ -x /opt/redpitaya/sbin/overlay.sh ]; then
-    /opt/redpitaya/sbin/overlay.sh v0.94
+exec 8>/tmp/pitaya_tdc.fpga.lock
+flock 8
+
+if [ -f /tmp/pitaya_tdc.want ]; then
+    echo "skip restore: TDC start requested"
+    exit 0
+fi
+
+if [ ! -x /opt/redpitaya/sbin/overlay.sh ]; then
+    echo "overlay.sh not found" >&2
+    exit 1
+fi
+if command -v timeout >/dev/null 2>&1; then
+    timeout 30 /opt/redpitaya/sbin/overlay.sh v0.94
     exit $?
 fi
+/opt/redpitaya/sbin/overlay.sh v0.94
 
 MODEL=$(/opt/redpitaya/bin/profiles -f 2>/dev/null || true)
 STOCK="/opt/redpitaya/fpga/${MODEL}/v0.94/fpga.bin"

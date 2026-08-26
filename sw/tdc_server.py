@@ -7,6 +7,7 @@ import argparse
 import json
 import mmap
 import os
+import socket
 import struct
 import sys
 import threading
@@ -545,8 +546,55 @@ def parse_base(text: str) -> int:
     return int(text, 0)
 
 
+SERVER_LOCK_PATH = "/tmp/pitaya_tdc.server.lock"
+
+
+def port_in_use(host: str, port: int) -> bool:
+    probe = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.3)
+    try:
+        return sock.connect_ex((probe, port)) == 0
+    finally:
+        sock.close()
+
+
+def acquire_instance_lock() -> Optional[int]:
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    fd = os.open(SERVER_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        os.close(fd)
+        print(
+            "tdc_server already running (lock %s)" % SERVER_LOCK_PATH,
+            file=sys.stderr,
+            flush=True,
+        )
+        return -1
+    os.ftruncate(fd, 0)
+    os.write(fd, ("%d\n" % os.getpid()).encode("ascii"))
+    os.fsync(fd)
+    return fd
+
+
 def main(argv: Optional[list] = None) -> int:
     args = parse_args(argv)
+    lock_fd: Optional[int] = None
+    if not args.sim:
+        if port_in_use(args.host, args.port):
+            print(
+                "tdc_server already listening on %s:%d" % (args.host, args.port),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        lock_fd = acquire_instance_lock()
+        if lock_fd == -1:
+            return 1
     if args.sim:
         device: TdcDevice = SimTdc(period_s=args.sim_period_ms / 1000.0, dt_ns=args.sim_dt_ns)
     else:
@@ -567,7 +615,15 @@ def main(argv: Optional[list] = None) -> int:
     TdcHttpHandler.device = device
     TdcHttpHandler.skew_ns = args.skew_ns
 
-    httpd = ThreadingHTTPServer((args.host, args.port), TdcHttpHandler)
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), TdcHttpHandler)
+    except OSError as exc:
+        print(
+            "could not bind %s:%d: %s" % (args.host, args.port, exc),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     udp = None
     if args.udp_port:
         udp = ThreadingUDPServer((args.host, args.udp_port), UdpPollHandler)
@@ -592,6 +648,8 @@ def main(argv: Optional[list] = None) -> int:
         close = getattr(device, "close", None)
         if close:
             close()
+        if lock_fd is not None and lock_fd >= 0:
+            os.close(lock_fd)
     return 0
 
 

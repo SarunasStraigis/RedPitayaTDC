@@ -1,8 +1,6 @@
 #!/bin/sh
-# nginx runs rmoverlay.sh before this, which drops v0.94. Restore that overlay
-# so GP0 /dev/mem still maps 0x40000000, then replace only the PL with tdc.bin.
-# Same method as the working SSH deploy. Unique firmware names force a reload
-# (fpga_manager no-ops if the last filename is reused after overlay.sh).
+# Called by Bazaar on tile open (after rmoverlay.sh) and by control.sh start.
+# Load tdc.bin only if TDC was started (.want / server). Otherwise restore v0.94.
 
 APPDIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 BIT="$APPDIR/fpga/tdc.bit"
@@ -11,6 +9,14 @@ LOG=/tmp/pitaya_tdc_fpga.log
 MGR=/sys/class/fpga_manager/fpga0
 PY=/usr/bin/python3
 export PATH=/usr/bin:/bin:/sbin:/opt/redpitaya/sbin:/opt/redpitaya/bin:$PATH
+
+exec 8>/tmp/pitaya_tdc.fpga.lock
+if flock -w 45 8; then
+    :
+else
+    echo "fpga lock timeout (another overlay still running)" >&2
+    exit 1
+fi
 
 {
 echo "---- $(date) ----"
@@ -47,13 +53,16 @@ ensure_bin() {
 }
 
 restore_v094() {
-    if [ -x /opt/redpitaya/sbin/overlay.sh ]; then
-        echo "overlay.sh v0.94"
-        /opt/redpitaya/sbin/overlay.sh v0.94
+    if [ ! -x /opt/redpitaya/sbin/overlay.sh ]; then
+        echo "overlay.sh not found"
+        return 1
+    fi
+    echo "overlay.sh v0.94"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 /opt/redpitaya/sbin/overlay.sh v0.94
         return $?
     fi
-    echo "overlay.sh not found"
-    return 1
+    /opt/redpitaya/sbin/overlay.sh v0.94
 }
 
 load_tdc_sysfs() {
@@ -86,17 +95,61 @@ load_tdc_sysfs() {
     return 1
 }
 
-if verify_id; then
+tdc_wanted() {
+    if [ -f /tmp/pitaya_tdc.want ]; then
+        echo "want file present"
+        return 0
+    fi
+    if [ -f /tmp/pitaya_tdc.pid ]; then
+        pid=$(tr -dc '0-9' < /tmp/pitaya_tdc.pid 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "tdc_server pid $pid alive"
+            return 0
+        fi
+    fi
+    if pgrep -f '/opt/redpitaya/www/apps/pitaya_tdc/tdc_server.py' >/dev/null 2>&1; then
+        echo "tdc_server.py process present"
+        return 0
+    fi
+    $PY - <<'PY'
+import json, sys, urllib.request
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8080/api/health", timeout=0.3) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if data.get("ok") and str(data.get("id") or "") in ("TDC1", "0x54444331") else 1)
+PY
+}
+
+verify_id
+id_rc=$?
+if [ "$id_rc" -eq 0 ]; then
     echo "TDC already loaded"
     echo -n "pitaya_tdc" > /tmp/loaded_fpga.inf 2>/dev/null || true
+    exit 0
+fi
+
+if ! tdc_wanted; then
+    echo "TDC not requested; restore v0.94 after rmoverlay"
+    restore_v094 || echo "overlay.sh v0.94 failed"
     exit 0
 fi
 
 ensure_bin || exit 1
 ls -l "$BIN" "$BIT" 2>/dev/null || true
 
-echo "step 1: restore v0.94 after rmoverlay"
-restore_v094 || echo "overlay.sh v0.94 failed (continuing)"
+mgr_state=$(cat "$MGR/state" 2>/dev/null || echo missing)
+echo "fpga_manager state=$mgr_state id_rc=$id_rc"
+
+# overlay.sh while the manager is already operating is what hangs Start
+# after Stop. Only restore the DT when the PL is actually down.
+if [ "$mgr_state" != "operating" ]; then
+    echo "step 1: manager not operating, restore v0.94"
+    restore_v094 || echo "overlay.sh v0.94 failed (continuing)"
+else
+    echo "step 1: skip overlay.sh (fpga_manager operating) — load bitstream only"
+fi
 
 echo "step 2: load TDC bitstream (sysfs)"
 if ! load_tdc_sysfs; then

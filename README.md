@@ -10,8 +10,9 @@ This is **not** the Red Pitaya oscilloscope app. The ADC buffer is only ~16 kS
 resolution.
 
 Open **Pitaya TDC** on the STEMlab home page (`http://rp-XXXX.local/`) after
-the one-time install below. Leaving the app (home, or another tool) restores
-the stock FPGA so Scope / SCPI work again.
+the one-time install below, then press **Start**. Leaving the page does
+nothing; **Stop** (or reboot) restores the stock FPGA so Scope / SCPI work
+again. Opening the tile alone does not load the TDC overlay.
 
 ## Hardware (STEMlab 125-14)
 
@@ -64,8 +65,9 @@ powershell -File fpga\tcl\build.ps1
 
 ## Deploy as a web app (primary)
 
-One-time copy onto the board. After that, start/stop is only the home-page
-tile — no SSH. Scope is unavailable **only while Pitaya TDC is open**.
+One-time copy onto the board. After that, Start/Stop is on the home-page tile
+and on port 80 — no SSH. The TDC FPGA is **not** loaded at boot and **not**
+loaded just by opening the tile.
 
 Needs `fpga/output/tdc.bit` from the step above, OpenSSH (`scp` / `ssh`), and
 the board reachable as `root@rp-XXXX.local`.
@@ -80,13 +82,27 @@ If the repo is already on the Pitaya:
 sh rp_app/install.sh
 ```
 
-Then open `http://rp-XXXX.local/` and click **Pitaya TDC**. The page shows
-the live interval (same as `sw/tdc_monitor.py`). PC sweep tools can still use
-`http://rp-XXXX.local:8080` while the app is running.
+Then open `http://rp-XXXX.local/`, click **Pitaya TDC**, and press **Start**.
+The page shows the live interval (same as `sw/tdc_monitor.py`). Leaving the
+page keeps the FPGA and poll server running. Press **Stop** to restore `v0.94`.
+
+PC sweep tools (DelayLama) can start TDC without SSH, then poll `:8080`:
+
+```bash
+curl -X POST http://rp-XXXX.local/pitaya_tdc/control/start
+curl http://rp-XXXX.local:8080/api/latest
+curl -X POST http://rp-XXXX.local/pitaya_tdc/control/stop
+```
+
+Call **stop in `finally`**. A forgotten Start leaves Scope dead until Stop or
+reboot. A second Start while healthy is a no-op (one `tdc_server.py` on :8080).
+
+Clicking **Scope** (or any other FPGA app) still loads that app’s bitstream
+and will overwrite TDC until you Start again.
 
 `/opt/redpitaya` is read-only; the install script remounts it, copies
 `/opt/redpitaya/www/apps/pitaya_tdc/`, builds `controllerhf.so` on the device,
-and restarts nginx.
+enables the localhost control helper, and restarts nginx.
 
 If the tile is missing, `tail -f /var/log/redpitaya_debug.log` while clicking
 it, and confirm `controllerhf.so` exists in that folder.
@@ -94,13 +110,16 @@ it, and confirm `controllerhf.so` exists in that folder.
 If the tile has no icon, open `http://rp-XXXX.local/pitaya_tdc/info/icon/128.png`
 directly. OS 2.00 uses that path (not `info/icon.png`). If it 404s, re-run install.
 
-If health stays offline, the FPGA loader log is `/tmp/pitaya_tdc_fpga.log`
+If Start stays offline, the FPGA loader log is `/tmp/pitaya_tdc_fpga.log`
 (not only `/tmp/pitaya_tdc.log`). `0x00000001` at the TDC ID register means
-the stock FPGA is still loaded.
+the stock FPGA is still loaded. Control helper: `curl http://rp-XXXX.local/pitaya_tdc/control/status`.
 
 To uninstall:
 
 ```bash
+systemctl disable --now pitaya-tdc-control.service pitaya-tdc-control.socket
+rm -f /etc/systemd/system/pitaya-tdc-control.service /etc/systemd/system/pitaya-tdc-control.socket
+systemctl daemon-reload
 rw || mount -o remount,rw /opt/redpitaya
 rm -rf /opt/redpitaya/www/apps/pitaya_tdc /opt/redpitaya/www/apps/femto_tdc
 systemctl restart redpitaya_nginx
@@ -187,13 +206,18 @@ after the stock overlay is back.
 
 ## Poll API
 
-On the Pitaya after deploy (Python 3, stdlib only):
+On the Pitaya after **Start**. Prefer port 80 so you do not need SSH:
 
 ```bash
-python3 /root/tdc/tdc_server.py --host 0.0.0.0 --port 8080 --udp-port 8081
+curl -X POST http://rp-XXXX.local/pitaya_tdc/control/start
+curl http://rp-XXXX.local/pitaya_tdc/control/status
+curl -X POST http://rp-XXXX.local/pitaya_tdc/control/stop
 ```
 
-Without hardware you can exercise the same API from the PC:
+A second Start while healthy is a no-op. Manual `python3 tdc_server.py` on :8080
+exits if an instance is already bound.
+
+Without hardware you can exercise the same measurement API from the PC:
 
 ```bash
 python sw/tdc_server.py --sim
@@ -326,9 +350,9 @@ python sw/test_api.py
 - `fpga/rtl/tdc_axi.v` — AXI-Lite last-result registers, IDDR-per-pin mux, 125 MHz TDC
 - `fpga/constr/stemlab_125_14.xdc` — E1 pinout
 - `fpga/tcl/build.tcl` / `fpga/tcl/build.ps1` — Vivado batch build
-- `rp_app/pitaya_tdc/` — STEMlab web app (tile, FPGA load/restore, in-browser monitor)
+- `rp_app/pitaya_tdc/` — STEMlab web app (tile, Start/Stop, in-browser monitor)
 - `rp_app/install.ps1` / `rp_app/install.sh` — one-time copy onto the board
 - `sw/bit_to_bin.py` — `.bit` → byte-swapped `.bin` for `fpga_manager`
-- `sw/tdc_server.py` — REST + UDP on the Pitaya
+- `sw/tdc_server.py` — REST + UDP on the Pitaya (one instance on :8080)
 - `sw/tdc_poll.py` — PC helper
 - `sw/tdc_monitor.py` — PC GUI (`--url http://rp-XXXX.local:8080`)

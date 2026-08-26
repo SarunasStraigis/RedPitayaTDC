@@ -3,8 +3,10 @@
 
     var APP_ID = "pitaya_tdc";
     var API_PATHS = ["/pitaya_tdc/api", "http://" + location.hostname + ":8080/api"];
+    var CONTROL = "/pitaya_tdc/control";
     var apiBase = API_PATHS[0];
     var POLL_MS = 100;
+    var CONTROL_POLL_MS = 1000;
     var BAD_FLAGS = { unmatched_stop: 1, timeout: 1, overflow: 1 };
 
     var lastSeq = null;
@@ -12,6 +14,12 @@
     var lastGoodAt = 0;
     var seqWindow = [];
     var started = false;
+    var tdcRunning = false;
+    var controlBusy = false;
+    var stopping = false;
+    var starting = false;
+    var startError = null;
+    var startSince = 0;
 
     function $(id) {
         return document.getElementById(id);
@@ -156,8 +164,8 @@
         fillPinSelect(stopSel, list, payload.stop && payload.stop.index);
         fillingPins = false;
         var selectable = !!(payload && payload.selectable);
-        startSel.disabled = !selectable;
-        stopSel.disabled = !selectable;
+        startSel.disabled = !selectable || !tdcRunning;
+        stopSel.disabled = !selectable || !tdcRunning;
         pinsLoaded = selectable || list.length > 0;
         var s = payload.start && payload.start.label;
         var t = payload.stop && payload.stop.label;
@@ -168,7 +176,7 @@
         } else if (s && t) {
             $("wiring").textContent =
                 "START = " + s + ", STOP = " + t +
-                " (3.3 V TTL rising edge). Leave this page to restore Scope.";
+                " (3.3 V TTL rising edge). Stop restores Scope; leaving this page does not.";
         }
     }
 
@@ -254,11 +262,78 @@
         tryNext();
     }
 
+    function setButtons(running, busy) {
+        $("btnStart").disabled = !!(busy || running);
+        $("btnStop").disabled = !(running || starting);
+    }
+
+    function applyStopped(status) {
+        tdcRunning = false;
+        if (!controlBusy) {
+            setButtons(false, false);
+        }
+        $("status").textContent = "Stopped — Start to load TDC";
+        $("health").textContent = (status && status.fpga_id && status.fpga_id !== "TDC1")
+            ? ("stopped  fpga=" + status.fpga_id)
+            : "stopped";
+        $("meaning").textContent = startError
+            ? startError
+            : "Press Start to load the TDC FPGA and poll server. Leaving this page does nothing.";
+        $("dt").textContent = "—";
+        $("startPin").disabled = true;
+        $("stopPin").disabled = true;
+        pinsLoaded = false;
+    }
+
+    function postControl(cmd) {
+        controlBusy = true;
+        setButtons(tdcRunning, true);
+        $("status").textContent = cmd === "start" ? "Starting…" : "Stopping…";
+        var opts = { method: "POST", cache: "no-store" };
+        var timer = null;
+        if (typeof AbortController !== "undefined") {
+            var ac = new AbortController();
+            opts.signal = ac.signal;
+            timer = setTimeout(function () {
+                ac.abort();
+            }, cmd === "start" ? 8000 : 8000);
+        }
+        return fetch(CONTROL + "/" + cmd, opts)
+            .then(function (res) {
+                return res.text().then(function (text) {
+                    var body = {};
+                    try {
+                        body = text ? JSON.parse(text) : {};
+                    } catch (e) {
+                        throw new Error(text ? text.slice(0, 180) : ("HTTP " + res.status));
+                    }
+                    if (!res.ok) {
+                        throw new Error(body.error || ("HTTP " + res.status));
+                    }
+                    return body;
+                });
+            })
+            .catch(function (err) {
+                if (err && err.name === "AbortError") {
+                    throw new Error(cmd === "start"
+                        ? "Start timed out — FPGA overlay may still be finishing. Try again in a few seconds."
+                        : "Stop timed out");
+                }
+                throw err;
+            })
+            .finally(function () {
+                if (timer) {
+                    clearTimeout(timer);
+                }
+                controlBusy = false;
+            });
+    }
+
     function apply(err, health, latest) {
         if (err) {
-            $("status").textContent = "Waiting for TDC server…";
+            $("status").textContent = "TDC server not responding";
             $("health").textContent = "offline";
-            $("meaning").textContent = "FPGA and tdc_server.py start when this app opens.";
+            $("meaning").textContent = "FPGA may still be loading. If this stays, check /tmp/pitaya_tdc.log.";
             return;
         }
 
@@ -354,13 +429,82 @@
         }
     }
 
-    function poll() {
+    function pollData() {
+        if (!tdcRunning) {
+            return;
+        }
         Promise.all([getJsonAny("/health"), getJsonAny("/latest")])
             .then(function (pair) {
                 apply(null, pair[0], pair[1]);
             })
+            .catch(function () {
+                $("status").textContent = "TDC server not responding";
+            });
+    }
+
+    function poll() {
+        fetch(CONTROL + "/status", { cache: "no-store" })
+            .then(function (res) {
+                if (!res.ok) {
+                    throw new Error("HTTP " + res.status);
+                }
+                return res.json();
+            })
+            .then(function (st) {
+                var running = !!(st && st.state === "running");
+                var isStarting = !!(st && st.state === "starting") || starting;
+                if (stopping) {
+                    if (!running) {
+                        applyStopped(st);
+                    }
+                    return null;
+                }
+                if (running) {
+                    starting = false;
+                    startSince = 0;
+                    startError = null;
+                    controlBusy = false;
+                    tdcRunning = true;
+                    setButtons(true, false);
+                    pollData();
+                    return null;
+                }
+                tdcRunning = false;
+                if (isStarting) {
+                    starting = true;
+                    if (!startSince) {
+                        startSince = Date.now();
+                    }
+                    if (Date.now() - startSince > 40000) {
+                        startError = "Start is taking too long. Try Stop, then Start again.";
+                        $("status").textContent = "Starting… stuck";
+                        $("meaning").textContent = startError;
+                        setButtons(false, false);
+                        $("btnStop").disabled = false;
+                        return null;
+                    }
+                    $("status").textContent = "Starting…";
+                    setButtons(true, true);
+                    return null;
+                }
+                starting = false;
+                startSince = 0;
+                if (!controlBusy) {
+                    setButtons(false, false);
+                    applyStopped(st);
+                }
+                return null;
+            })
             .catch(function (err) {
-                apply(String(err), null, null);
+                if (controlBusy) {
+                    return;
+                }
+                $("status").textContent = "Waiting for control helper…";
+                $("health").textContent = "offline";
+                $("meaning").textContent = String(err.message || err);
+                setButtons(false, false);
+                $("startPin").disabled = true;
+                $("stopPin").disabled = true;
             });
     }
 
@@ -376,8 +520,47 @@
                 putPins();
             }
         });
-        loadPins();
+        $("btnStart").addEventListener("click", function () {
+            starting = true;
+            startSince = Date.now();
+            stopping = false;
+            startError = null;
+            $("status").textContent = "Starting…";
+            postControl("start")
+                .then(function (body) {
+                    if (body && body.state === "running") {
+                        starting = false;
+                    }
+                    pinsLoaded = false;
+                    poll();
+                })
+                .catch(function (err) {
+                    starting = false;
+                    startError = String(err.message || err);
+                    $("meaning").textContent = startError;
+                    poll();
+                });
+        });
+        $("btnStop").addEventListener("click", function () {
+            stopping = true;
+            tdcRunning = false;
+            applyStopped();
+            $("status").textContent = "Stopping…";
+            postControl("stop")
+                .then(function () {
+                    stopping = false;
+                    applyStopped();
+                    poll();
+                })
+                .catch(function (err) {
+                    stopping = false;
+                    $("meaning").textContent = String(err.message || err);
+                    poll();
+                });
+        });
+        applyStopped();
         poll();
-        setInterval(poll, POLL_MS);
+        setInterval(poll, CONTROL_POLL_MS);
+        setInterval(pollData, POLL_MS);
     });
 })();

@@ -1,20 +1,10 @@
 // Lifecycle shim: nginx loads this as controllerhf.so.
-// fpga.sh is also run here in case nginx skipped it or left the stock FPGA.
+// Start/Stop is control.sh (via /pitaya_tdc/control/). Opening or leaving
+// the tile must not load, unload, or restart the TDC.
 
-#include <cerrno>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-static const char *kAppDir = "/opt/redpitaya/www/apps/pitaya_tdc";
-static const char *kPidFile = "/tmp/pitaya_tdc.pid";
-static const char *kServerPy = "/opt/redpitaya/www/apps/pitaya_tdc/tdc_server.py";
 
 extern "C" {
 
@@ -27,115 +17,17 @@ typedef struct rp_app_params_s {
     float max_val;
 } rp_app_params_t;
 
-static void write_pid(pid_t pid) {
-    FILE *f = fopen(kPidFile, "w");
-    if (!f) {
-        return;
-    }
-    fprintf(f, "%d\n", (int)pid);
-    fclose(f);
-}
-
-static pid_t read_pid(void) {
-    FILE *f = fopen(kPidFile, "r");
-    if (!f) {
-        return -1;
-    }
-    int pid = -1;
-    if (fscanf(f, "%d", &pid) != 1) {
-        pid = -1;
-    }
-    fclose(f);
-    return (pid_t)pid;
-}
-
-static void stop_server(void) {
-    pid_t pid = read_pid();
-    if (pid > 1) {
-        kill(pid, SIGTERM);
-        for (int i = 0; i < 20; i++) {
-            if (kill(pid, 0) != 0 && errno == ESRCH) {
-                break;
-            }
-            usleep(50000);
-        }
-        if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-            usleep(50000);
-        }
-        waitpid(pid, NULL, WNOHANG);
-    }
-    unlink(kPidFile);
-    /* Leftover from a crashed previous launch. */
-    int wr = system("pkill -f '/opt/redpitaya/www/apps/pitaya_tdc/tdc_server.py' >/dev/null 2>&1");
-    (void)wr;
-}
-
-static int start_server(void) {
-    stop_server();
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("pitaya_tdc: fork");
-        return -1;
-    }
-    if (pid == 0) {
-        if (chdir(kAppDir) != 0) {
-            perror("pitaya_tdc: chdir");
-            _exit(127);
-        }
-        setsid();
-        int logfd = open("/tmp/pitaya_tdc.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (logfd >= 0) {
-            dup2(logfd, STDOUT_FILENO);
-            dup2(logfd, STDERR_FILENO);
-            if (logfd > 2) {
-                close(logfd);
-            }
-        }
-        int devnull = open("/dev/null", O_RDWR);
-        if (devnull >= 0) {
-            dup2(devnull, STDIN_FILENO);
-            if (devnull > 2) {
-                close(devnull);
-            }
-        }
-        execl("/usr/bin/python3", "python3", kServerPy,
-              "--host", "0.0.0.0", "--port", "8080", "--udp-port", "0",
-              (char *)NULL);
-        execlp("python3", "python3", kServerPy,
-               "--host", "0.0.0.0", "--port", "8080", "--udp-port", "0",
-               (char *)NULL);
-        _exit(127);
-    }
-    write_pid(pid);
-    /* fpga.sh has just programmed the PL; python mmap can lose a race. */
-    usleep(800000);
-    return 0;
-}
-
 const char *rp_app_desc(void) {
     return "Pitaya TDC start/stop interval\n";
 }
 
 int rp_app_init(void) {
-    fprintf(stderr, "pitaya_tdc: rp_app_init\n");
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "/bin/sh %s/fpga.sh", kAppDir);
-    int rc = system(cmd);
-    fprintf(stderr, "pitaya_tdc: fpga.sh rc=%d (see /tmp/pitaya_tdc_fpga.log)\n", rc);
-    return start_server();
+    fprintf(stderr, "pitaya_tdc: rp_app_init (no FPGA/server change)\n");
+    return 0;
 }
 
 int rp_app_exit(void) {
-    fprintf(stderr, "pitaya_tdc: rp_app_exit\n");
-    stop_server();
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "%s/restore_fpga.sh", kAppDir);
-    int rc = system(cmd);
-    if (rc != 0) {
-        fprintf(stderr, "pitaya_tdc: restore_fpga.sh rc=%d\n", rc);
-    }
+    fprintf(stderr, "pitaya_tdc: rp_app_exit (leave running)\n");
     return 0;
 }
 

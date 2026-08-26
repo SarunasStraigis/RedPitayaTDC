@@ -29,10 +29,44 @@ header h1 {
     font-weight: 600;
 }
 
+.hdr-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
 .status {
-    margin: 0 0 16px;
+    margin: 0;
     color: var(--muted);
     font-size: 0.95rem;
+}
+
+.controls {
+    display: flex;
+    gap: 8px;
+}
+
+.controls button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font: inherit;
+}
+
+.controls button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+#btnStart {
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 .interval {

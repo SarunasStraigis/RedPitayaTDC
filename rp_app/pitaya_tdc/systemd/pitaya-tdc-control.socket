@@ -1,0 +1,9 @@
+[Unit]
+Description=Pitaya TDC control socket (localhost Start/Stop)
+
+[Socket]
+ListenStream=127.0.0.1:12780
+Accept=no
+
+[Install]
+WantedBy=sockets.target

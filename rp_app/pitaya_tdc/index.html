@@ -9,7 +9,13 @@
 <body>
     <header>
         <h1>Pitaya TDC</h1>
-        <p class="status" id="status">Starting…</p>
+        <div class="hdr-row">
+            <p class="status" id="status">Stopped — Start to load TDC</p>
+            <div class="controls">
+                <button type="button" id="btnStart">Start</button>
+                <button type="button" id="btnStop" disabled>Stop</button>
+            </div>
+        </div>
     </header>
 
     <section class="interval">
@@ -19,10 +25,10 @@
 
     <section class="pins" id="pinRow">
         <label>START
-            <select id="startPin"></select>
+            <select id="startPin" disabled></select>
         </label>
         <label>STOP
-            <select id="stopPin"></select>
+            <select id="stopPin" disabled></select>
         </label>
     </section>
 
@@ -35,8 +41,8 @@
         <dt>health</dt><dd id="health">—</dd>
     </dl>
 
-    <p class="meaning" id="meaning">Waiting for the TDC server.</p>
-    <p class="wiring" id="wiring">E1 DIO, 3.3 V TTL rising edge. Default START is DIO7_P (E1 pin 17), STOP is DIO7_N (E1 pin 18). Leave this page to restore Scope.</p>
+    <p class="meaning" id="meaning">Press Start to load the TDC FPGA and poll server. Leaving this page does nothing.</p>
+    <p class="wiring" id="wiring">E1 DIO, 3.3 V TTL rising edge. Default START is DIO7_P (E1 pin 17), STOP is DIO7_N (E1 pin 18). Press Start to load TDC. Stop restores Scope.</p>
 
     <div class="log-hdr">
         <span>New measurements (seq changed)</span>

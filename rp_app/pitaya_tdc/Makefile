@@ -10,7 +10,7 @@ LDFLAGS = -shared -fPIC
 .PHONY: all clean
 
 all: controllerhf.so
-	chmod +x fpga.sh restore_fpga.sh
+	chmod +x fpga.sh restore_fpga.sh control.sh
 
 controllerhf.so: src/main.cpp
 	$(CXX) $(CFLAGS) $(LDFLAGS) -o $@ $<

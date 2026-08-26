@@ -1,5 +1,5 @@
 # One-time install of the Pitaya TDC web app onto a STEMlab.
-# After this, start/stop is the home-page tile (no SSH).
+# After this, Start/Stop is in the web tile (port 80). No SSH per measurement.
 #
 # Usage:
 #   powershell -File rp_app\install.ps1 -HostName rp-f0cebb.local
@@ -38,6 +38,8 @@ if (Test-Path $stage) {
     Remove-Item $stage -Recurse -Force
 }
 Copy-Item $AppSrc $stage -Recurse
+Get-ChildItem $stage -Recurse -Directory -Filter __pycache__ -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force
 Copy-Item (Join-Path $Repo "sw\tdc_server.py") $stage -Force
 Copy-Item (Join-Path $Repo "sw\tdc_regs.py") $stage -Force
 Copy-Item (Join-Path $Repo "sw\bit_to_bin.py") $stage -Force
@@ -56,7 +58,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 Get-ChildItem $stage -Recurse -File | Where-Object {
-    $_.Extension -match '^\.(sh|py|js|html|css|json|conf|cpp)$' -or $_.Name -eq "Makefile"
+    $_.Extension -match '^\.(sh|py|js|html|css|json|conf|cpp|service|socket)$' -or $_.Name -eq "Makefile"
 } | ForEach-Object {
     $text = [System.IO.File]::ReadAllText($_.FullName)
     $text = ($text -replace "`r`n", "`n") -replace "`r", "`n"
@@ -64,31 +66,49 @@ Get-ChildItem $stage -Recurse -File | Where-Object {
 }
 
 Write-Host "Remounting /opt/redpitaya and replacing $RemoteApp ..."
-ssh $Target "rw >/dev/null 2>&1 || mount -o remount,rw /opt/redpitaya; rm -rf $RemoteApp $RemoteApps/femto_tdc"
+ssh $Target "rw >/dev/null 2>&1 || mount -o remount,rw /opt/redpitaya; rm -rf $RemoteApp $RemoteApps/femto_tdc; mkdir -p $RemoteApp"
 
-Write-Host "Copying app tree (one scp) ..."
-scp -r $stage "${Target}:${RemoteApp}"
+$tar = Join-Path $env:TEMP "pitaya_tdc_deploy.tar.gz"
+if (Test-Path $tar) {
+    Remove-Item $tar -Force
+}
+Write-Host "Copying app tree (one tar) ..."
+tar -czf $tar -C $stage .
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to create $tar"
+}
+scp $tar "${Target}:/tmp/pitaya_tdc_deploy.tar.gz"
 
 Write-Host "Building controllerhf.so and restarting nginx ..."
 $remote = @'
 set -e
 APP=/opt/redpitaya/www/apps/pitaya_tdc
-# Windows OpenSSH scp -r may nest as pitaya_tdc/pitaya_tdc
-if [ -d "$APP/pitaya_tdc" ] && [ -f "$APP/pitaya_tdc/index.html" ]; then
-    cp -a "$APP/pitaya_tdc/." "$APP/"
-    rm -rf "$APP/pitaya_tdc"
-fi
+mkdir -p "$APP"
+tar -xzf /tmp/pitaya_tdc_deploy.tar.gz -C "$APP"
 cd "$APP"
-test -f index.html
-test -f info/icon/128.png
-test -f info/icon/256.png
-test -f info/icon/512.png
+test -s index.html
+test -s control.sh
+test -s tdc_control.py
+test -s systemd/pitaya-tdc-control.service
+test -s nginx.conf
+test -s info/info.json
+test -s info/icon/128.png
+test -s info/icon/256.png
+test -s info/icon/512.png
 find . -type f ! -name '*.so' ! -name '*.bit' ! -name '*.bin' ! -name '*.png' \
     -exec sed -i 's/\r$//' {} +
 find . -type d -exec chmod 755 {} +
 find . -type f -exec chmod 644 {} +
-chmod +x fpga.sh restore_fpga.sh
+chmod +x fpga.sh restore_fpga.sh control.sh
 make INSTALL_DIR=/opt/redpitaya
+test -s controllerhf.so
+test -s tdc_server.py
+cp systemd/pitaya-tdc-control.service /etc/systemd/system/
+systemctl disable --now pitaya-tdc-control.socket >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/pitaya-tdc-control.socket
+systemctl daemon-reload
+systemctl enable pitaya-tdc-control.service
+systemctl restart pitaya-tdc-control.service
 if systemctl restart redpitaya_nginx 2>/dev/null; then
     :
 elif systemctl restart nginx 2>/dev/null; then
@@ -110,7 +130,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Open http://$HostName/ and click Pitaya TDC."
+Write-Host "Open http://$HostName/ , click Pitaya TDC, then press Start."
 Write-Host "If the tile has no icon: http://$HostName/pitaya_tdc/info/icon/128.png"
+Write-Host "Start/Stop: http://$HostName/pitaya_tdc/control/status"
 Write-Host "If health stays offline:"
 Write-Host "  ssh $Target `"tail -50 /tmp/pitaya_tdc_fpga.log /tmp/pitaya_tdc.log`""
