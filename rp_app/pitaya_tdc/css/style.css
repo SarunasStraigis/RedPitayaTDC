@@ -1,0 +1,112 @@
+:root {
+    --bg: #0e1116;
+    --panel: #171c24;
+    --text: #e8edf4;
+    --muted: #8b97a8;
+    --accent: #3db8ff;
+    --line: #2a3340;
+    font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100%;
+}
+
+body {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 16px 18px 24px;
+}
+
+header h1 {
+    margin: 0 0 4px;
+    font-size: 1.35rem;
+    font-weight: 600;
+}
+
+.status {
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-size: 0.95rem;
+}
+
+.interval {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 16px 16px;
+    margin-bottom: 16px;
+}
+
+.interval .label {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.interval .value {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 2.4rem;
+    line-height: 1.2;
+    color: var(--accent);
+}
+
+.meta {
+    display: grid;
+    grid-template-columns: 7.5rem 1fr;
+    gap: 4px 12px;
+    margin: 0 0 14px;
+}
+
+.meta dt {
+    color: var(--muted);
+    margin: 0;
+}
+
+.meta dd {
+    margin: 0;
+    font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+.meaning {
+    margin: 0 0 8px;
+    line-height: 1.4;
+}
+
+.wiring {
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-size: 0.88rem;
+}
+
+.log-hdr {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.log-hdr label {
+    color: var(--text);
+}
+
+#log {
+    margin: 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    min-height: 180px;
+    max-height: 40vh;
+    overflow: auto;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+}

@@ -1,4 +1,4 @@
-# FemtoSyncTester — Red Pitaya start/stop pulse interval
+# Pitaya TDC — Red Pitaya start/stop pulse interval
 
 Measure the time between two 3.3 V TTL rising edges (START then STOP) on a
 STEMlab 125-14, with **4 ns** resolution (meets &lt;5 ns) and a range of **0 ns to
@@ -8,6 +8,10 @@ Ethernet with REST (or a one-shot UDP request).
 This is **not** the Red Pitaya oscilloscope app. The ADC buffer is only ~16 kS
 (~131 µs at 125 MS/s), so a 1 ms delay cannot be timed that way at nanosecond
 resolution.
+
+Open **Pitaya TDC** on the STEMlab home page (`http://rp-XXXX.local/`) after
+the one-time install below. Leaving the app (home, or another tool) restores
+the stock FPGA so Scope / SCPI work again.
 
 ## Hardware (STEMlab 125-14)
 
@@ -38,7 +42,7 @@ vivado -mode batch -source fpga/tcl/build.tcl
 Or from the Vivado Tcl Shell:
 
 ```tcl
-cd {C:/Users/sarunas/source/repos/FemtoSyncTester}
+cd {<this-repo>}
 source fpga/tcl/build.tcl
 ```
 
@@ -52,11 +56,49 @@ On Windows you can also run:
 powershell -File fpga\tcl\build.ps1
 ```
 
-## Deploy on the Pitaya
+## Deploy as a web app (primary)
 
-Load the overlay **after Linux is up**. Do not replace the boot image. This
-bitstream replaces the stock FPGA, so Scope / SCPI stay dead until you restore
-`v0.94` or reboot.
+One-time copy onto the board. After that, start/stop is only the home-page
+tile — no SSH. Scope is unavailable **only while Pitaya TDC is open**.
+
+Needs `fpga/output/tdc.bit` from the step above, OpenSSH (`scp` / `ssh`), and
+the board reachable as `root@rp-XXXX.local`.
+
+```powershell
+powershell -File rp_app\install.ps1 -HostName rp-XXXX.local
+```
+
+If the repo is already on the Pitaya:
+
+```bash
+sh rp_app/install.sh
+```
+
+Then open `http://rp-XXXX.local/` and click **Pitaya TDC**. The page shows
+the live interval (same as `sw/tdc_monitor.py`). PC sweep tools can still use
+`http://rp-XXXX.local:8080` while the app is running.
+
+`/opt/redpitaya` is read-only; the install script remounts it, copies
+`/opt/redpitaya/www/apps/pitaya_tdc/`, builds `controllerhf.so` on the device,
+and restarts nginx.
+
+If the tile is missing, `tail -f /var/log/redpitaya_debug.log` while clicking
+it, and confirm `controllerhf.so` exists in that folder.
+
+To uninstall:
+
+```bash
+rw || mount -o remount,rw /opt/redpitaya
+rm -rf /opt/redpitaya/www/apps/pitaya_tdc /opt/redpitaya/www/apps/femto_tdc
+systemctl restart redpitaya_nginx
+ro || mount -o remount,ro /opt/redpitaya
+```
+
+## Deploy over SSH (fallback)
+
+Use this if you do not want the web tile. Load the overlay **after Linux is
+up**. Do not replace the boot image. This bitstream replaces the stock FPGA,
+so Scope / SCPI stay dead until you restore `v0.94` or reboot.
 
 ### 1. Copy files
 
@@ -268,7 +310,9 @@ python sw/test_api.py
 - `fpga/rtl/tdc_axi.v` — AXI-Lite last-result registers, IDDR, 125 MHz TDC
 - `fpga/constr/stemlab_125_14.xdc` — E1 pinout
 - `fpga/tcl/build.tcl` / `fpga/tcl/build.ps1` — Vivado batch build
+- `rp_app/pitaya_tdc/` — STEMlab web app (tile, FPGA load/restore, in-browser monitor)
+- `rp_app/install.ps1` / `rp_app/install.sh` — one-time copy onto the board
 - `sw/bit_to_bin.py` — `.bit` → byte-swapped `.bin` for `fpga_manager`
 - `sw/tdc_server.py` — REST + UDP on the Pitaya
 - `sw/tdc_poll.py` — PC helper
-- `sw/tdc_monitor.py` — live GUI (`--url http://rp-XXXX.local:8080`)
+- `sw/tdc_monitor.py` — PC GUI (`--url http://rp-XXXX.local:8080`)

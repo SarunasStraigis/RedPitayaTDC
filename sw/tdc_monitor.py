@@ -66,7 +66,7 @@ def meaning(flags, valid, armed) -> str:
 class Monitor(tk.Tk):
     def __init__(self, url: str):
         super().__init__()
-        self.title("FemtoSync TDC")
+        self.title("Pitaya TDC")
         self.geometry("640x520")
         self.minsize(520, 420)
 

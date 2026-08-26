@@ -10,3 +10,12 @@ __pycache__/
 *.pyc
 .idea/
 .vscode/
+hs_err_pid*
+rp_app/pitaya_tdc/controllerhf.so
+rp_app/pitaya_tdc/*.o
+rp_app/pitaya_tdc/src/*.o
+rp_app/pitaya_tdc/fpga/*.bit
+rp_app/pitaya_tdc/fpga/*.bin
+rp_app/pitaya_tdc/tdc_server.py
+rp_app/pitaya_tdc/tdc_regs.py
+rp_app/pitaya_tdc/bit_to_bin.py

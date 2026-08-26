@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pitaya TDC</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Pitaya TDC</h1>
+        <p class="status" id="status">Starting…</p>
+    </header>
+
+    <section class="interval">
+        <div class="label">Interval</div>
+        <div class="value" id="dt">—</div>
+    </section>
+
+    <dl class="meta">
+        <dt>seq</dt><dd id="seq">—</dd>
+        <dt>flags</dt><dd id="flags">—</dd>
+        <dt>armed</dt><dd id="armed">—</dd>
+        <dt>age</dt><dd id="age">—</dd>
+        <dt>event rate</dt><dd id="rate">—</dd>
+        <dt>health</dt><dd id="health">—</dd>
+    </dl>
+
+    <p class="meaning" id="meaning">Waiting for the TDC server.</p>
+    <p class="wiring">E1 pin 17 = START, pin 18 = STOP (3.3 V TTL rising edge). Leave this page to restore Scope.</p>
+
+    <div class="log-hdr">
+        <span>New measurements (seq changed)</span>
+        <label><input type="checkbox" id="validOnly" checked> Valid only</label>
+    </div>
+    <pre id="log"></pre>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

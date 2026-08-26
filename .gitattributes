@@ -1,0 +1,2 @@
+rp_app/**/*.sh text eol=lf
+rp_app/**/Makefile text eol=lf
